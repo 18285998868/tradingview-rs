@@ -1,7 +1,7 @@
 //! 行情数据加载：binance zip → K 线列 → 内存缓存。
 
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -322,6 +322,70 @@ fn time_window(
     start..end
 }
 
+/// 品种目录下是否确实有可读的 kline 文件（空目录不算）。
+///
+/// binance 的 zip 躺在周期子目录里，dukascopy 的 `.bi5` 嵌在 `年/月/日` 多层目录里。
+fn pair_has_data(market_type: MarketType, pair_dir: &Path) -> bool {
+    match market_type {
+        MarketType::Dukascopy => has_data_files(pair_dir, market_type.data_ext()),
+        _ => std::fs::read_dir(pair_dir)
+            .map(|rd| {
+                rd.flatten()
+                    .any(|e| e.path().is_dir() && has_kline_files(&e.path()))
+            })
+            .unwrap_or(false),
+    }
+}
+
+/// 扫描 dukascopy 品种目录，返回**确有 `.bi5` 文件**的周期（按 [`Timeframe::ALL`] 顺序）。
+///
+/// Dukascopy 把聚合粒度编码在文件名里（`BID_candles_hour_1.bi5`），目录结构不区分
+/// 周期。只要目录里存在任意 `.bi5` 就宣称支持 M1/H1/D1，会让前端默认落到空图；
+/// 这里按 reader 的文件命名逐个核对，三个都找到就提前结束遍历。
+///
+/// [`Timeframe::ALL`]: dukascopy_core::Timeframe::ALL
+fn dukascopy_timeframes_with_files(pair_dir: &Path) -> Vec<dukascopy_core::Timeframe> {
+    let timeframes = dukascopy_core::Timeframe::ALL;
+    // 归档文件名 = `{BID|ASK}_{candles_min_1|candles_hour_1|candles_day_1}.bi5`
+    let expected: Vec<[String; 2]> = timeframes
+        .iter()
+        .map(|timeframe| {
+            let stem = timeframe.file_stem();
+            dukascopy_core::PriceType::ALL
+                .map(|price_type| format!("{}_{stem}.bi5", price_type.prefix()))
+        })
+        .collect();
+    let mut found = [false; dukascopy_core::Timeframe::ALL.len()];
+
+    fn walk(dir: &Path, expected: &[[String; 2]], found: &mut [bool]) {
+        if found.iter().all(|hit| *hit) {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, expected, found);
+            } else if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                for (idx, names) in expected.iter().enumerate() {
+                    if !found[idx] && names.iter().any(|candidate| candidate.as_str() == name) {
+                        found[idx] = true;
+                    }
+                }
+            }
+        }
+    }
+    walk(pair_dir, &expected, &mut found);
+
+    timeframes
+        .into_iter()
+        .zip(found)
+        .filter_map(|(timeframe, hit)| hit.then_some(timeframe))
+        .collect()
+}
+
 /// 缓存键：市场类型 + 交易对 + 周期。
 type CacheKey = (MarketType, String, String);
 
@@ -345,81 +409,97 @@ impl DataLoader {
         }
     }
 
-    /// 行情根目录。
+    /// 数据源根目录（按 reader 的归档约定给出**全部**候选）。
     ///
-    /// - Futures：`{dir}/binance/data/futures/um/daily/klines`（binance futures/um
-    ///   daily 布局，周期是**子目录**）。
-    /// - Dukascopy：`{dir}/dukascopy`（周期不是目录，而是同一批 `.bi5` 的不同聚合粒度）。
-    /// - Spot：本地暂无对应数据源，返回 `None`，调用方按空/404 处理。
-    fn base_path(&self, market_type: MarketType) -> Option<PathBuf> {
+    /// - Futures：`daily` 与 `monthly` 两棵归档。reader 会合并两处（同一 UTC 日
+    ///   日线优先），发现层也必须同时看：只扫 `daily` 会漏掉仅存在于月度归档的
+    ///   品种（已下架合约）和周期（`3d`/`1w`/`1mo`），而 reader 本身能读。
+    /// - Dukascopy：`{dir}/dukascopy`（周期不是目录，而是文件名里的聚合粒度）。
+    /// - Spot：本地暂无对应数据源，返回空，调用方按空/404 处理。
+    fn bases(&self, market_type: MarketType) -> Vec<PathBuf> {
         match market_type {
-            MarketType::Futures => Some(
-                self.data_dir
-                    .join("binance")
-                    .join("data")
-                    .join("futures")
-                    .join("um")
-                    .join("daily")
-                    .join("klines"),
-            ),
-            MarketType::Spot => None,
-            MarketType::Dukascopy => Some(self.data_dir.join("dukascopy")),
+            MarketType::Futures => ["daily", "monthly"]
+                .into_iter()
+                .map(|period| {
+                    self.data_dir
+                        .join("binance")
+                        .join("data")
+                        .join("futures")
+                        .join("um")
+                        .join(period)
+                        .join("klines")
+                })
+                .collect(),
+            MarketType::Spot => Vec::new(),
+            MarketType::Dukascopy => vec![self.data_dir.join("dukascopy")],
         }
     }
 
-    /// 列出可用交易对（字典序）。
+    /// 列出可用交易对（字典序去重）。
+    ///
+    /// binance 取 `daily ∪ monthly`：只有月度归档的品种（例如已下架合约）也要出现。
     pub fn list_pairs(&self, market_type: MarketType) -> Result<Vec<String>, DataError> {
-        let Some(base) = self.base_path(market_type) else {
-            return Ok(vec![]);
-        };
-        if !base.exists() {
-            return Ok(vec![]);
+        let mut pairs = Vec::new();
+        for base in self.bases(market_type) {
+            if !base.exists() {
+                continue;
+            }
+            for entry in std::fs::read_dir(&base)?.flatten() {
+                let path = entry.path();
+                if !path.is_dir() || !pair_has_data(market_type, &path) {
+                    continue;
+                }
+                if let Ok(name) = entry.file_name().into_string() {
+                    pairs.push(name);
+                }
+            }
         }
-        let mut pairs: Vec<String> = std::fs::read_dir(&base)?
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().is_dir())
-            .filter_map(|e| e.file_name().into_string().ok())
-            .collect();
         pairs.sort();
+        pairs.dedup();
         Ok(pairs)
     }
 
-    /// 列出某交易对下有数据的周期（按周期大小排序）。
+    /// 列出某交易对下**确有数据文件**的周期（按周期大小排序）。
     pub fn list_timeframes(
         &self,
         market_type: MarketType,
         pair: &str,
     ) -> Result<Vec<String>, DataError> {
-        let Some(base) = self.base_path(market_type) else {
-            return Ok(vec![]);
-        };
-        let pair_dir = base.join(pair);
-        if !pair_dir.exists() {
-            return Ok(vec![]);
-        }
-
-        // binance：周期是子目录，目录里有 zip 即为"有数据"。
-        // dukascopy：同一批 .bi5 可聚合成多个周期，周期由数据源决定，
-        //   故取"该源支持的周期 ∩ 本地确有 .bi5 的品种"。
-        let timeframes: Vec<String> = match market_type {
+        let mut timeframes: Vec<String> = match market_type {
+            // 周期编码在文件名（`BID_candles_hour_1.bi5`），只列真实存在的粒度：
+            // 全列 M1/H1/D1 会让前端默认落到空图（本地往往只下了一部分粒度）。
             MarketType::Dukascopy => {
-                if !has_data_files(&pair_dir, market_type.data_ext()) {
-                    return Ok(vec![]);
-                }
-                dukascopy_core::Timeframe::ALL
-                    .iter()
+                let Some(base) = self.bases(market_type).into_iter().next() else {
+                    return Ok(Vec::new());
+                };
+                dukascopy_timeframes_with_files(&base.join(pair))
+                    .into_iter()
                     .map(|timeframe| timeframe.as_str().to_string())
                     .collect()
             }
-            _ => std::fs::read_dir(&pair_dir)?
-                .filter_map(|e| e.ok())
-                .filter(|e| e.path().is_dir())
-                .filter(|e| has_kline_files(&e.path()))
-                .filter_map(|e| e.file_name().into_string().ok())
-                .collect(),
+            // binance：周期是子目录，子目录里有 zip 即为"有数据"；日/月两处取并集。
+            _ => {
+                let mut found = Vec::new();
+                for base in self.bases(market_type) {
+                    let pair_dir = base.join(pair);
+                    if !pair_dir.exists() {
+                        continue;
+                    }
+                    for entry in std::fs::read_dir(&pair_dir)?.flatten() {
+                        let path = entry.path();
+                        if !path.is_dir() || !has_kline_files(&path) {
+                            continue;
+                        }
+                        if let Ok(name) = entry.file_name().into_string() {
+                            found.push(name);
+                        }
+                    }
+                }
+                found
+            }
         };
-        let mut timeframes = timeframes;
         timeframes.sort_by_key(|a| timeframe_order(a));
+        timeframes.dedup();
         Ok(timeframes)
     }
 
@@ -475,7 +555,7 @@ impl DataLoader {
         }
         tracing::debug!(?key, "cache miss — reading kline files");
 
-        // 周期合法性由数据源裁定：不同源的可用周期不同（binance 1m..1d，
+        // 周期合法性由数据源裁定：不同源的可用周期不同（binance 1m..1mo，
         // dukascopy M1/H1/D1，别名 1m/1h/1d 由 reader 归一），由对应 reader
         // 判定才能给出"该源支持哪些"的准确信息；用户输错属于 400 而非 500。
         match market_type {
@@ -491,29 +571,36 @@ impl DataLoader {
             }
         }
 
-        let Some(base) = self.base_path(market_type) else {
+        let ext = market_type.data_ext();
+
+        // binance：周期是子目录，日/月两棵归档都要探测（reader 会合并两处）；
+        // dukascopy：品种目录下直接是年/月/日。
+        let probe_dirs: Vec<PathBuf> = self
+            .bases(market_type)
+            .into_iter()
+            .map(|base| match market_type {
+                MarketType::Dukascopy => base.join(pair),
+                _ => base.join(pair).join(timeframe),
+            })
+            .collect();
+        if probe_dirs.is_empty() {
             tracing::warn!("market not backed by a data reader yet");
             return Err(DataError::NotFound(format!(
                 "market not supported: {pair}/{timeframe}"
             )));
-        };
-        let ext = market_type.data_ext();
-
-        // binance：周期是子目录；dukascopy：品种目录下直接是年/月/日。
-        let probe_dir = match market_type {
-            MarketType::Dukascopy => base.join(pair),
-            _ => base.join(pair).join(timeframe),
-        };
-        if !probe_dir.exists() {
-            tracing::warn!(path = %probe_dir.display(), "kline directory not found");
-            return Err(DataError::NotFound(probe_dir.display().to_string()));
         }
-
-        if !has_data_files(&probe_dir, ext) {
-            tracing::warn!(path = %probe_dir.display(), ext, "no kline data files");
+        if !probe_dirs
+            .iter()
+            .any(|dir| dir.exists() && has_data_files(dir, ext))
+        {
+            let paths: Vec<String> = probe_dirs
+                .iter()
+                .map(|dir| dir.display().to_string())
+                .collect();
+            tracing::warn!(?paths, ext, "no kline data files");
             return Err(DataError::NotFound(format!(
                 "no {ext} data files in {}",
-                probe_dir.display()
+                probe_dirs[0].display()
             )));
         }
 
@@ -574,29 +661,34 @@ mod tests {
     use std::path::Path;
     use tempfile::TempDir;
 
-    fn binance_tf_dir(dir: &Path, pair: &str, timeframe: &str) -> PathBuf {
+    fn binance_kline_dir(dir: &Path, period: &str, pair: &str, timeframe: &str) -> PathBuf {
         dir.join("binance")
             .join("data")
             .join("futures")
             .join("um")
-            .join("daily")
+            .join(period)
             .join("klines")
             .join(pair)
             .join(timeframe)
+    }
+
+    fn binance_tf_dir(dir: &Path, pair: &str, timeframe: &str) -> PathBuf {
+        binance_kline_dir(dir, "daily", pair, timeframe)
     }
 
     /// 2024-01-01T00:00:00Z；所有 kline fixture 都落在这天的文件周期内。
     const BASE_MS: i64 = 1_704_067_200_000;
     const HOUR_MS: i64 = 3_600_000;
 
-    fn write_test_zip(
+    fn write_test_zip_in(
         dir: &Path,
+        period: &str,
         pair: &str,
         timeframe: &str,
         name: &str,
         rows: &[(i64, f64, f64, f64, f64, f64)],
     ) {
-        let tf_dir = binance_tf_dir(dir, pair, timeframe);
+        let tf_dir = binance_kline_dir(dir, period, pair, timeframe);
         std::fs::create_dir_all(&tf_dir).unwrap();
         let mut csv = String::new();
         for r in rows {
@@ -622,6 +714,16 @@ mod tests {
         use std::io::Write as _;
         zip.write_all(csv.as_bytes()).unwrap();
         zip.finish().unwrap();
+    }
+
+    fn write_test_zip(
+        dir: &Path,
+        pair: &str,
+        timeframe: &str,
+        name: &str,
+        rows: &[(i64, f64, f64, f64, f64, f64)],
+    ) {
+        write_test_zip_in(dir, "daily", pair, timeframe, name, rows);
     }
 
     fn test_rows() -> Vec<(i64, f64, f64, f64, f64, f64)> {
@@ -725,6 +827,81 @@ mod tests {
             .list_timeframes(MarketType::Futures, "BTCUSDT")
             .unwrap();
         assert_eq!(tfs, vec!["1h", "1d"]);
+    }
+
+    #[test]
+    fn test_monthly_only_pair_and_timeframe_are_visible() {
+        let dir = TempDir::new().unwrap();
+        // 真实数据里 FTTUSDT / LUNAUSDT 只有月度归档（日线归档没有该品种目录）。
+        write_test_zip_in(
+            dir.path(),
+            "monthly",
+            "FTTUSDT",
+            "1h",
+            "FTTUSDT-1h-2024-01.zip",
+            &test_rows(),
+        );
+        // 只有空周期目录的品种不算"有数据"。
+        std::fs::create_dir_all(binance_kline_dir(dir.path(), "monthly", "EMPTYUSDT", "1h"))
+            .unwrap();
+
+        let loader = DataLoader::new(dir.path());
+        assert_eq!(
+            loader.list_pairs(MarketType::Futures).unwrap(),
+            vec!["FTTUSDT"]
+        );
+        assert_eq!(
+            loader
+                .list_timeframes(MarketType::Futures, "FTTUSDT")
+                .unwrap(),
+            vec!["1h"]
+        );
+
+        let klines = loader
+            .load_klines_filtered(MarketType::Futures, "FTTUSDT", "1h", None, None, None)
+            .unwrap();
+        assert_eq!(klines.len(), 3);
+    }
+
+    #[test]
+    fn test_daily_and_monthly_are_unioned() {
+        let dir = TempDir::new().unwrap();
+        write_test_zip(
+            dir.path(),
+            "BTCUSDT",
+            "1h",
+            "BTCUSDT-1h-2024-01-01.zip",
+            &test_rows(),
+        );
+        // 月度归档覆盖整月；reader 合并时日线优先、月线只补日线缺口。
+        write_test_zip_in(
+            dir.path(),
+            "monthly",
+            "BTCUSDT",
+            "1h",
+            "BTCUSDT-1h-2024-01.zip",
+            &[(BASE_MS + 24 * HOUR_MS, 104.0, 109.0, 99.0, 106.0, 30.0)],
+        );
+
+        let loader = DataLoader::new(dir.path());
+        // 同一品种/周期在两处出现，对外只列一次。
+        assert_eq!(
+            loader.list_pairs(MarketType::Futures).unwrap(),
+            vec!["BTCUSDT"]
+        );
+        assert_eq!(
+            loader
+                .list_timeframes(MarketType::Futures, "BTCUSDT")
+                .unwrap(),
+            vec!["1h"]
+        );
+
+        let klines = loader
+            .load_klines_filtered(MarketType::Futures, "BTCUSDT", "1h", None, None, None)
+            .unwrap();
+        assert_eq!(klines.len(), 4);
+        assert_eq!(klines[0].time, BASE_MS);
+        assert_eq!(klines[3].time, BASE_MS + 24 * HOUR_MS);
     }
 
     #[test]
@@ -1070,6 +1247,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_dukascopy_tree(dir.path(), "EURUSD");
         write_dukascopy_tree(dir.path(), "XAUUSD");
+        // 只有空目录的品种不能对外暴露（选了就是空图）。
+        std::fs::create_dir_all(dir.path().join("dukascopy").join("USDJPY")).unwrap();
 
         let loader = DataLoader::new(dir.path());
         let pairs = loader.list_pairs(MarketType::Dukascopy).unwrap();
@@ -1077,19 +1256,31 @@ mod tests {
     }
 
     #[test]
-    fn test_dukascopy_lists_source_supported_timeframes() {
+    fn test_dukascopy_lists_only_timeframes_with_files() {
         let dir = TempDir::new().unwrap();
+        // write_dukascopy_tree 只落 M1 文件：没下 H1/D1 就不能对外宣称支持。
         write_dukascopy_tree(dir.path(), "EURUSD");
 
         let loader = DataLoader::new(dir.path());
         let tfs = loader
             .list_timeframes(MarketType::Dukascopy, "EURUSD")
             .unwrap();
-        // 周期由数据源决定（同一批 .bi5 的不同聚合粒度），不是子目录；
-        // reader 0.2 只对外列规范名，别名 1m/1h/1d 仍在解析边界被接受。
-        assert!(tfs.contains(&"H1".to_string()));
-        assert!(tfs.contains(&"D1".to_string()));
-        assert!(!tfs.contains(&"3m".to_string())); // dukascopy 不支持 3m
+        assert_eq!(tfs, vec!["M1"]);
+
+        // 补上 H1/D1（含 ASK 侧）后按周期大小返回全部三个。
+        let day_dir = dir
+            .path()
+            .join("dukascopy")
+            .join("EURUSD")
+            .join("2025")
+            .join("00")
+            .join("02");
+        std::fs::write(day_dir.join("BID_candles_hour_1.bi5"), b"stub").unwrap();
+        std::fs::write(day_dir.join("ASK_candles_day_1.bi5"), b"stub").unwrap();
+        let tfs = loader
+            .list_timeframes(MarketType::Dukascopy, "EURUSD")
+            .unwrap();
+        assert_eq!(tfs, vec!["M1", "H1", "D1"]);
     }
 
     #[test]

@@ -65,7 +65,7 @@ src/main.rs         # 入口：dotenv(CWD) → tracing → Config::load() → ru
 src/lib.rs          # 只做导出 + crate 级 lint + README 内联文档
 src/app/mod.rs      # 执行代码：run(config) 编排（data_dir/状态库/AppState/路由+CORS/静态/serve）+ 优雅停机
 src/app/routes.rs   # 执行代码：AppState（DataLoader + 状态库）+ ApiResponse + 行情/状态路由
-src/app/data_loader.rs # MarketType{Futures,Spot,Dukascopy} + KlineColumns(SoA) + DataLoader：两个 reader + moka
+src/app/data_loader.rs # MarketType{Futures,Spot,Dukascopy} + KlineColumns(SoA) + DataLoader：两个 reader + moka（发现层按 reader 约定：binance daily∪monthly、dukascopy 文件名粒度）
 src/app/state.rs    # 状态库：layouts/drawings/preferences CRUD + 限额校验 + SQLite 连接
 migrations/         # SQLite 表结构（include_str! 进二进制，启动时幂等建表）
 src/config.rs       # 支撑件：Config{host/port/data_dir/db_path/frontend_dir/cors_origins} + load/load_from + validate
@@ -96,7 +96,8 @@ frontend/           # 前端工程：src/{api,app,chart,indicators,main,types} +
 - **`/api/market-types` 只列"本地确有数据源"的类型**：`futures`（binance um）+ `dukascopy`（外汇/贵金属）。`spot` 变体仍可解析但无本地数据，不对外暴露 —— 否则前端会列出"选了就是空图"的选项。
 - 入参做目录穿越防护（`..`/`/etc/passwd` 类输入有单测覆盖），并限长（pair ≤ 32、timeframe ≤ 16）。
 - 请求规模防护：`limit` ≤ 10000，超限返回 400。
-- **周期合法性由数据源裁定**：binance 支持 `1m..1d`，dukascopy 支持 `M1/H1/D1/1m/1h/1d`。输错返回 400（`DataError::InvalidParam`），并回传该源支持的周期列表。
+- **周期合法性由数据源裁定**：binance 支持 `1m..1mo`，dukascopy 支持 `M1/H1/D1/1m/1h/1d`。输错返回 400（`DataError::InvalidParam`），并回传该源支持的周期列表。
+- **发现层按 reader 的归档约定走，不假设单一目录**：binance 取 `daily ∪ monthly`（reader 合并两处，日线优先），否则只有月度归档的下架品种（如 `FTTUSDT`/`LUNAUSDT`）和大周期（`3d`/`1w`/`1mo`）会整体消失；dukascopy 按文件名粒度（`BID_candles_{min_1|hour_1|day_1}.bi5`）**只列真实存在的周期**，避免默认落到没下过的粒度。
 - `DataLoader` 按市场类型定位数据文件，读后进 moka 缓存，统一包 `ApiResponse{success, data, error}`。
 - 状态路由：`/api/layouts`（列表/创建）、`/api/layouts/{id}`（读取/更新/删除）、`/api/drawings?market_type=&pair=`（读取/整组替换）、`/api/preferences`（读取/合并写入）。状态错误按输入 400、内部 500 映射，404 只用于不存在的布局。
 - 缓存用 **SoA 列集** `KlineColumns`（`time/open/high/low/close/volume` 六条 `Vec`）：reader 本身就是列存储，中间层再存 `Vec<Kline>` 会多出 6 份结构体拷贝。
@@ -168,6 +169,12 @@ tokio 的 worker 线程只做调度。读 zip（实测 52ms）这类同步重活
 - 当刷新页面丢失周期/指标/策略/绘图时，
   - 解决：`last_session` + 按交易对绘图组持久化到 SQLite，启动恢复；命名布局可显式保存多套
   - 文件：`frontend/src/app.ts`、`src/app/state.rs`、`migrations/001_init.sql`
+- 当交易对/周期只存在于月度归档时（下架合约、`3d`/`1w`/`1mo`），
+  - 解决：发现层扫 `daily ∪ monthly` 并去重，reader 负责按日合并
+  - 文件：`src/app/data_loader.rs`
+- 当 dukascopy 只下了一部分粒度时，
+  - 解决：按 `BID/ASK_candles_{min_1|hour_1|day_1}.bi5` 文件名核对，只列真实存在的周期
+  - 文件：`src/app/data_loader.rs`
 
 ## 完整架构
 
@@ -216,7 +223,7 @@ cors_origins = []           # 可选，默认 [] = 全放行（仅本地开发�
 - src/app/state.rs
   - SQLite CRUD + 输入限额 + `spawn_blocking` 调用边界；布局/绘图/偏好三类状态
 - src/app/data_loader.rs
-  - `MarketType` 解析 → 数据文件定位（binance zip / dukascopy bi5）→ reader 读 → 去非有限值/去重 → moka 存 → 返回列集
+  - `MarketType` 解析 → 发现（binance `daily ∪ monthly`，dukascopy 按 `BID/ASK_candles_*` 文件名）→ reader 读 → 去非有限值/去重 → moka 存 → 返回列集
 - src/utils/mod.rs
   - 参数白名单校验 + 数据文件判别 + 周期排序
 - frontend/

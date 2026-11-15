@@ -392,6 +392,7 @@ pub async fn symbols_handler(
 
     let resolutions = timeframes_to_resolutions(&timeframes);
     let has_intraday = resolutions.iter().any(|r| *r != "1D");
+    let has_daily = resolutions.contains(&"1D");
     (
         StatusCode::OK,
         Json(json!({
@@ -408,7 +409,7 @@ pub async fn symbols_handler(
             "minmov": 1,
             "pricescale": parsed.pricescale(),
             "has_intraday": has_intraday,
-            "has_daily": true,
+            "has_daily": has_daily,
             "has_weekly_and_monthly": false,
             "has_empty_bars": false,
             "supported_resolutions": resolutions
