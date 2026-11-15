@@ -1,5 +1,6 @@
 //! 行情数据加载：binance zip → K 线列 → 内存缓存。
 
+use std::mem::size_of;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -13,6 +14,35 @@ use crate::utils::{has_data_files, has_kline_files, timeframe_order};
 
 /// 单个数据集超过该行数时打告警（内存占用提示）。
 const LARGE_DATASET_ROWS: usize = 500_000;
+
+/// K 线缓存容量上限（KiB，即 2 GiB）。
+///
+/// 按条数计容量在真实数据下不可控：单 bar 常驻 48 字节，1m 级长历史一条
+/// 列集就上百 MB，200 条的上限可能吃掉十几 GB。按字节计权后，上限直接
+/// 就是内存预算。
+const CACHE_CAPACITY_KIB: u64 = 2 * 1024 * 1024;
+
+/// 条目空闲多久后回收：热数据留在内存，冷品种让位给新请求。
+const CACHE_TIME_TO_IDLE: Duration = Duration::from_secs(10 * 60);
+
+/// 条目最长存活时间。
+///
+/// 归档由外部下载器更新，缓存收不到失效通知；TTL 给"新下载的数据最迟
+/// 多久可见"一个上界，避免热 key 因为一直命中而永远读不到新文件。
+const CACHE_TIME_TO_LIVE: Duration = Duration::from_secs(30 * 60);
+
+/// 交易对目录缓存的条数上限（按市场计，实际只有几个键）。
+const CATALOG_PAIRS_CAPACITY: u64 = 8;
+
+/// 周期目录缓存的条数上限（按市场 + 交易对计）。
+const CATALOG_TIMEFRAMES_CAPACITY: u64 = 1024;
+
+/// 目录扫描结果的存活时间。
+///
+/// 扫描是纯读操作但要递归 `read_dir`（每个品种还要探测数据文件），
+/// `/api/pairs`、`/udf/search`、`/udf/symbols` 每次请求都重扫代价太高；
+/// 目录又会被外部下载器改动，所以 TTL 只给 1 分钟。
+const CATALOG_TIME_TO_LIVE: Duration = Duration::from_secs(60);
 
 /// 行情市场类型。
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
@@ -217,6 +247,22 @@ impl KlineColumns {
         self.time.is_empty()
     }
 
+    /// 常驻堆内存的估算值（KiB，向上取整，至少 1）。
+    ///
+    /// 六列都是 8 字节定长，`Vec::capacity` 就是上界；用容量而不是 `len`，
+    /// 免得漏算预留但未使用的空间。单位与 [`CACHE_CAPACITY_KIB`] 一致。
+    #[must_use]
+    fn weight_kib(&self) -> u32 {
+        let bars = self.time.capacity()
+            + self.open.capacity()
+            + self.high.capacity()
+            + self.low.capacity()
+            + self.close.capacity()
+            + self.volume.capacity();
+        let kib = (bars * size_of::<f64>()).div_ceil(1024).max(1);
+        u32::try_from(kib).unwrap_or(u32::MAX)
+    }
+
     /// 取区间内的列副本（越界自动收敛到合法范围）。
     #[must_use]
     pub fn slice(&self, range: Range<usize>) -> Self {
@@ -389,12 +435,41 @@ fn dukascopy_timeframes_with_files(pair_dir: &Path) -> Vec<dukascopy_core::Timef
 /// 缓存键：市场类型 + 交易对 + 周期。
 type CacheKey = (MarketType, String, String);
 
+/// 目录扫描的缓存策略：短 TTL、失败不缓存、同 key single-flight。
+///
+/// 失败不入缓存（moka `try_get_with` 只在 `Ok` 时插入），权限或 IO 抖动
+/// 恢复后下一次请求立刻能成功。
+fn cached_scan<K, T, F>(
+    cache: &moka::sync::Cache<K, Arc<T>>,
+    key: K,
+    scan: F,
+) -> Result<Arc<T>, DataError>
+where
+    K: Eq + std::hash::Hash + Send + Sync + 'static,
+    T: Send + Sync + 'static,
+    F: FnOnce() -> Result<T, DataError>,
+{
+    cache
+        .try_get_with(key, || scan().map(Arc::new).map_err(LoadError::from))
+        .map_err(|err| err.to_data_error())
+}
+
 /// 行情数据加载器。
 ///
 /// 读到的列集以 `Arc` 共享并进 moka 缓存，命中时零拷贝。
 pub struct DataLoader {
     data_dir: PathBuf,
     klines_cache: moka::sync::Cache<CacheKey, Arc<KlineColumns>>,
+    /// 交易对目录扫描结果（键：市场）。
+    pairs_cache: moka::sync::Cache<MarketType, Arc<Vec<String>>>,
+    /// 周期目录扫描结果（键：市场 + 交易对）。
+    timeframes_cache: moka::sync::Cache<(MarketType, String), Arc<Vec<String>>>,
+    /// 测试用：真实读盘次数（验证 single-flight 只读一次）。
+    #[cfg(test)]
+    load_count: std::sync::atomic::AtomicUsize,
+    /// 测试用：读盘前的固定延时（把并发窗口拉长到可观测）。
+    #[cfg(test)]
+    read_delay: std::sync::Mutex<Option<Duration>>,
 }
 
 impl DataLoader {
@@ -403,9 +478,25 @@ impl DataLoader {
         Self {
             data_dir: data_dir.into(),
             klines_cache: moka::sync::Cache::builder()
-                .max_capacity(200)
-                .time_to_live(Duration::from_secs(300))
+                // 权重单位是 KiB，`max_capacity` 与 `KlineColumns::weight_kib`
+                // 必须用同一单位，否则预算会差三个数量级。
+                .max_capacity(CACHE_CAPACITY_KIB)
+                .weigher(|_key: &CacheKey, columns: &Arc<KlineColumns>| columns.weight_kib())
+                .time_to_idle(CACHE_TIME_TO_IDLE)
+                .time_to_live(CACHE_TIME_TO_LIVE)
                 .build(),
+            pairs_cache: moka::sync::Cache::builder()
+                .max_capacity(CATALOG_PAIRS_CAPACITY)
+                .time_to_live(CATALOG_TIME_TO_LIVE)
+                .build(),
+            timeframes_cache: moka::sync::Cache::builder()
+                .max_capacity(CATALOG_TIMEFRAMES_CAPACITY)
+                .time_to_live(CATALOG_TIME_TO_LIVE)
+                .build(),
+            #[cfg(test)]
+            load_count: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            read_delay: std::sync::Mutex::new(None),
         }
     }
 
@@ -438,7 +529,16 @@ impl DataLoader {
     /// 列出可用交易对（字典序去重）。
     ///
     /// binance 取 `daily ∪ monthly`：只有月度归档的品种（例如已下架合约）也要出现。
+    /// 结果缓存 60 秒，过期后重扫。
     pub fn list_pairs(&self, market_type: MarketType) -> Result<Vec<String>, DataError> {
+        let pairs = cached_scan(&self.pairs_cache, market_type, || {
+            self.scan_pairs(market_type)
+        })?;
+        Ok(pairs.as_ref().clone())
+    }
+
+    /// 真正扫描交易对目录的那一半（缓存未命中时执行）。
+    fn scan_pairs(&self, market_type: MarketType) -> Result<Vec<String>, DataError> {
         let mut pairs = Vec::new();
         for base in self.bases(market_type) {
             if !base.exists() {
@@ -460,7 +560,22 @@ impl DataLoader {
     }
 
     /// 列出某交易对下**确有数据文件**的周期（按周期大小排序）。
+    ///
+    /// 结果缓存 60 秒，过期后重扫。
     pub fn list_timeframes(
+        &self,
+        market_type: MarketType,
+        pair: &str,
+    ) -> Result<Vec<String>, DataError> {
+        let key = (market_type, pair.to_owned());
+        let timeframes = cached_scan(&self.timeframes_cache, key, || {
+            self.scan_timeframes(market_type, pair)
+        })?;
+        Ok(timeframes.as_ref().clone())
+    }
+
+    /// 真正扫描周期目录的那一半（缓存未命中时执行）。
+    fn scan_timeframes(
         &self,
         market_type: MarketType,
         pair: &str,
@@ -540,7 +655,10 @@ impl DataLoader {
         Ok(Arc::new(all.slice(range)))
     }
 
-    /// 读取全部 K 线列（带缓存）。
+    /// 读取全部 K 线列（带缓存 + single-flight）。
+    ///
+    /// 命中时零拷贝返回 `Arc`；未命中时同一 key 只允许一个线程读盘，其余
+    /// 线程等它的结果（moka `try_get_with` 的语义）。
     #[instrument(skip(self))]
     fn load_all_klines(
         &self,
@@ -549,11 +667,28 @@ impl DataLoader {
         timeframe: &str,
     ) -> Result<Arc<KlineColumns>, DataError> {
         let key = (market_type, pair.to_owned(), timeframe.to_owned());
-        if let Some(cached) = self.klines_cache.get(&key) {
-            tracing::debug!(?key, "cache hit");
-            return Ok(cached);
-        }
-        tracing::debug!(?key, "cache miss — reading kline files");
+        // 冷启动时多个请求会同时打同一个 zip：没有 single-flight 就是 N 倍
+        // 解压、N 份内存峰值，最后只有一份能进缓存。
+        self.klines_cache
+            .try_get_with(key, || {
+                self.read_all_klines(market_type, pair, timeframe)
+                    .map_err(LoadError::from)
+            })
+            .map_err(|err| err.to_data_error())
+    }
+
+    /// 缓存未命中时的真实读盘路径（同一 key 同一时刻只有一个线程执行）。
+    #[instrument(skip(self))]
+    fn read_all_klines(
+        &self,
+        market_type: MarketType,
+        pair: &str,
+        timeframe: &str,
+    ) -> Result<Arc<KlineColumns>, DataError> {
+        #[cfg(test)]
+        self.before_read();
+
+        tracing::debug!(%market_type, pair, timeframe, "cache miss — reading kline files");
 
         // 周期合法性由数据源裁定：不同源的可用周期不同（binance 1m..1mo，
         // dukascopy M1/H1/D1，别名 1m/1h/1d 由 reader 归一），由对应 reader
@@ -644,14 +779,66 @@ impl DataLoader {
         }
 
         tracing::debug!(count = cols.len(), "klines after clean");
-        let result = Arc::new(cols);
-        self.klines_cache.insert(key, result.clone());
-        Ok(result)
+        // 入缓存由 `try_get_with` 负责（含 single-flight 的结果分发）。
+        Ok(Arc::new(cols))
     }
 
-    /// 清空 K 线缓存。
+    /// 清空全部缓存（K 线列集 + 目录扫描结果）。
     pub fn invalidate_cache(&self) {
         self.klines_cache.invalidate_all();
+        self.pairs_cache.invalidate_all();
+        self.timeframes_cache.invalidate_all();
+    }
+
+    /// 测试钩子：累加真实读盘次数，并按需延时以拉开并发窗口。
+    #[cfg(test)]
+    fn before_read(&self) {
+        self.load_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let delay = *self.read_delay.lock().unwrap();
+        if let Some(delay) = delay {
+            std::thread::sleep(delay);
+        }
+    }
+}
+
+/// 可共享的读盘错误。
+///
+/// moka 的 single-flight 会把同一个错误分发给所有等待者，需要 `Clone`；
+/// [`DataError`] 内含 `io::Error`，做不到。这里只保留 HTTP 映射依赖的分类
+/// （`NotFound` → 404、`InvalidParam` → 400），其余压成一条消息统一按 500
+/// 处理——分类对响应没有影响，消息里的错误链仍然完整。
+#[derive(Debug, Clone, Error)]
+enum LoadError {
+    /// 数据目录里没有对应数据。
+    #[error("{0}")]
+    NotFound(String),
+    /// 入参非法（周期或市场不受支持）。
+    #[error("{0}")]
+    InvalidParam(String),
+    /// 其余失败：IO、reader 解析、数据不完整。
+    #[error("{0}")]
+    Other(String),
+}
+
+impl LoadError {
+    /// 还原成对外的 [`DataError`]。
+    fn to_data_error(&self) -> DataError {
+        match self {
+            Self::NotFound(msg) => DataError::NotFound(msg.clone()),
+            Self::InvalidParam(msg) => DataError::InvalidParam(msg.clone()),
+            Self::Other(msg) => DataError::Data(msg.clone()),
+        }
+    }
+}
+
+impl From<DataError> for LoadError {
+    fn from(err: DataError) -> Self {
+        match err {
+            DataError::NotFound(msg) => Self::NotFound(msg),
+            DataError::InvalidParam(msg) => Self::InvalidParam(msg),
+            other => Self::Other(other.to_string()),
+        }
     }
 }
 
@@ -800,6 +987,86 @@ mod tests {
         let loader = DataLoader::new(dir.path());
         let pairs = loader.list_pairs(MarketType::Futures).unwrap();
         assert_eq!(pairs, vec!["BTCUSDT", "ETHUSDT"]);
+    }
+
+    #[test]
+    fn test_list_pairs_cached_until_invalidated() {
+        let dir = TempDir::new().unwrap();
+        write_test_zip(
+            dir.path(),
+            "BTCUSDT",
+            "1h",
+            "BTCUSDT-1h-2024-01-01.zip",
+            &test_rows(),
+        );
+
+        let loader = DataLoader::new(dir.path());
+        assert_eq!(
+            loader.list_pairs(MarketType::Futures).unwrap(),
+            vec!["BTCUSDT"]
+        );
+        // 目录缓存按市场分键：Spot 没有数据源，必须是空。
+        assert!(loader.list_pairs(MarketType::Spot).unwrap().is_empty());
+
+        // 新落盘的品种在 TTL 内不可见（否则每个请求都要重扫目录），
+        // 失效后立刻可见。
+        write_test_zip(
+            dir.path(),
+            "ETHUSDT",
+            "1h",
+            "ETHUSDT-1h-2024-01-01.zip",
+            &test_rows(),
+        );
+        assert_eq!(
+            loader.list_pairs(MarketType::Futures).unwrap(),
+            vec!["BTCUSDT"]
+        );
+        loader.invalidate_cache();
+        assert_eq!(
+            loader.list_pairs(MarketType::Futures).unwrap(),
+            vec!["BTCUSDT", "ETHUSDT"]
+        );
+    }
+
+    #[test]
+    fn test_list_timeframes_cached_until_invalidated() {
+        let dir = TempDir::new().unwrap();
+        write_test_zip(
+            dir.path(),
+            "BTCUSDT",
+            "1h",
+            "BTCUSDT-1h-2024-01-01.zip",
+            &test_rows(),
+        );
+
+        let loader = DataLoader::new(dir.path());
+        assert_eq!(
+            loader
+                .list_timeframes(MarketType::Futures, "BTCUSDT")
+                .unwrap(),
+            vec!["1h"]
+        );
+
+        write_test_zip(
+            dir.path(),
+            "BTCUSDT",
+            "4h",
+            "BTCUSDT-4h-2024-01-01.zip",
+            &test_rows(),
+        );
+        assert_eq!(
+            loader
+                .list_timeframes(MarketType::Futures, "BTCUSDT")
+                .unwrap(),
+            vec!["1h"]
+        );
+        loader.invalidate_cache();
+        assert_eq!(
+            loader
+                .list_timeframes(MarketType::Futures, "BTCUSDT")
+                .unwrap(),
+            vec!["1h", "4h"]
+        );
     }
 
     #[test]
@@ -1227,6 +1494,95 @@ mod tests {
         });
     }
 
+    #[test]
+    fn test_cache_weight_counts_bytes() {
+        // 6 列 × 8 字节 × 10000 根 = 480000 字节 ≈ 469 KiB；
+        // 空列集按 1 KiB 计，避免零权重条目永远挤不掉。
+        let cols = KlineColumns {
+            time: vec![0; 10_000],
+            open: vec![0.0; 10_000],
+            high: vec![0.0; 10_000],
+            low: vec![0.0; 10_000],
+            close: vec![0.0; 10_000],
+            volume: vec![0.0; 10_000],
+        };
+        assert_eq!(cols.weight_kib(), 469);
+        assert_eq!(KlineColumns::default().weight_kib(), 1);
+    }
+
+    #[test]
+    fn test_cache_registers_weighted_size() {
+        let dir = TempDir::new().unwrap();
+        write_test_zip(
+            dir.path(),
+            "BTCUSDT",
+            "1h",
+            "BTCUSDT-1h-2024-01-01.zip",
+            &test_rows(),
+        );
+
+        let loader = DataLoader::new(dir.path());
+        let cols = loader
+            .load_columns_filtered(MarketType::Futures, "BTCUSDT", "1h", None, None)
+            .unwrap();
+        loader.klines_cache.run_pending_tasks();
+        assert_eq!(loader.klines_cache.entry_count(), 1);
+        assert_eq!(
+            loader.klines_cache.weighted_size(),
+            u64::from(cols.weight_kib())
+        );
+    }
+
+    #[test]
+    fn test_concurrent_misses_share_one_read() {
+        let dir = TempDir::new().unwrap();
+        write_test_zip(
+            dir.path(),
+            "BTCUSDT",
+            "1h",
+            "BTCUSDT-1h-2024-01-01.zip",
+            &test_rows(),
+        );
+
+        let loader = Arc::new(DataLoader::new(dir.path()));
+        *loader.read_delay.lock().unwrap() = Some(Duration::from_millis(100));
+
+        let barrier = std::sync::Barrier::new(8);
+        std::thread::scope(|s| {
+            for _ in 0..8 {
+                let loader = Arc::clone(&loader);
+                let barrier = &barrier;
+                s.spawn(move || {
+                    // 先对齐起跑线，再一起打同一个未命中的 key。
+                    barrier.wait();
+                    let cols = loader
+                        .load_columns_filtered(MarketType::Futures, "BTCUSDT", "1h", None, None)
+                        .unwrap();
+                    assert_eq!(cols.len(), 3);
+                });
+            }
+        });
+
+        assert_eq!(
+            loader.load_count.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+    }
+
+    #[test]
+    fn test_load_error_keeps_http_class() {
+        // NotFound/InvalidParam 决定 404/400，共享一圈后不能降级成 500。
+        let not_found = LoadError::from(DataError::NotFound("missing".into())).to_data_error();
+        assert!(matches!(not_found, DataError::NotFound(ref msg) if msg == "missing"));
+
+        let invalid = LoadError::from(DataError::InvalidParam("bad tf".into())).to_data_error();
+        assert!(matches!(invalid, DataError::InvalidParam(ref msg) if msg == "bad tf"));
+
+        let io = LoadError::from(DataError::Io(std::io::Error::other("disk"))).to_data_error();
+        assert!(matches!(io, DataError::Data(_)));
+        assert!(io.to_string().contains("disk"));
+    }
+
     // ---- Dukascopy 数据源 ----
 
     /// 造一个 dukascopy 目录树：`{dir}/dukascopy/{symbol}/{yyyy}/{MM}/{dd}/*.bi5`，
@@ -1277,6 +1633,8 @@ mod tests {
             .join("02");
         std::fs::write(day_dir.join("BID_candles_hour_1.bi5"), b"stub").unwrap();
         std::fs::write(day_dir.join("ASK_candles_day_1.bi5"), b"stub").unwrap();
+        // 目录扫描结果有 1 分钟 TTL：补文件后要显式失效才能立刻看到。
+        loader.invalidate_cache();
         let tfs = loader
             .list_timeframes(MarketType::Dukascopy, "EURUSD")
             .unwrap();

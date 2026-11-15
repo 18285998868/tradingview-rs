@@ -111,7 +111,7 @@ async fn udf_fixture_endpoints() {
 
     let (status, history) = get_json(
         &app,
-        "/udf/history?symbol=BINANCE:BTCUSDT&resolution=60&from=1699920000&to=1699927200",
+        "/udf/history?symbol=BINANCE:BTCUSDT&resolution=60&from=1699920000&to=1699930800",
     )
     .await;
     assert_eq!(status, StatusCode::OK);

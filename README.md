@@ -65,8 +65,9 @@ src/main.rs         # 入口：dotenv(CWD) → tracing → Config::load() → ru
 src/lib.rs          # 只做导出 + crate 级 lint + README 内联文档
 src/app/mod.rs      # 执行代码：run(config) 编排（data_dir/状态库/AppState/路由+CORS/静态/serve）+ 优雅停机
 src/app/routes.rs   # 执行代码：AppState（DataLoader + 状态库）+ ApiResponse + 行情/状态路由
-src/app/data_loader.rs # MarketType{Futures,Spot,Dukascopy} + KlineColumns(SoA) + DataLoader：两个 reader + moka（发现层按 reader 约定：binance daily∪monthly、dukascopy 文件名粒度）
+src/app/data_loader.rs # MarketType{Futures,Spot,Dukascopy} + KlineColumns(SoA) + DataLoader：两个 reader + moka 两级缓存（列集按字节计权、目录扫描 60s）；发现层按 reader 约定：binance daily∪monthly、dukascopy 文件名粒度
 src/app/state.rs    # 状态库：layouts/drawings/preferences CRUD + 限额校验 + SQLite 连接
+src/app/udf/        # TradingView UDF：symbol/resolution/history/price/protocol/handlers 六个子模块
 migrations/         # SQLite 表结构（include_str! 进二进制，启动时幂等建表）
 src/config.rs       # 支撑件：Config{host/port/data_dir/db_path/frontend_dir/cors_origins} + load/load_from + validate
 src/error.rs        # 支撑件：AppError(Io/Config/ConfigRead/ConfigParse/Data/State/InvalidAddr, non_exhaustive)
@@ -101,6 +102,8 @@ frontend/           # 前端工程：src/{api,app,chart,indicators,main,types} +
 - `DataLoader` 按市场类型定位数据文件，读后进 moka 缓存，统一包 `ApiResponse{success, data, error}`。
 - 状态路由：`/api/layouts`（列表/创建）、`/api/layouts/{id}`（读取/更新/删除）、`/api/drawings?market_type=&pair=`（读取/整组替换）、`/api/preferences`（读取/合并写入）。状态错误按输入 400、内部 500 映射，404 只用于不存在的布局。
 - 缓存用 **SoA 列集** `KlineColumns`（`time/open/high/low/close/volume` 六条 `Vec`）：reader 本身就是列存储，中间层再存 `Vec<Kline>` 会多出 6 份结构体拷贝。
+- 缓存预算按字节而不是条数：权重取六列 `Vec::capacity` 之和（约 48 字节/bar），上限 2 GiB；条目空闲 10 分钟回收，最长存活 30 分钟（归档由外部下载器更新，TTL 给"新数据最迟多久可见"一个上界）。同一 key 的并发未命中由 moka `try_get_with` 收敛成一次读盘，其余请求等它的结果。
+- 目录扫描（`list_pairs` / `list_timeframes`）另有一级 60 秒 TTL 缓存，键分别是市场、市场 + 交易对；否则 `/api/pairs`、`/udf/search`、`/udf/symbols` 每次请求都要递归 `read_dir` 并逐个品种探测数据文件。
 - 时间过滤用二分（`partition_point`）定位窗口，只拷贝窗口内的 bar；`limit` 取窗口内**最后** N 根。
 
 ### 并发模型（阻塞 IO 不占 worker）
@@ -133,10 +136,14 @@ tokio 的 worker 线程只做调度。读 zip（实测 52ms）这类同步重活
 - 独立的 `/udf/*` 命名空间，复用本地 `DataLoader`，不改变 `/api/*` 契约。Charting Library 的 Datafeed URL 填 `http://127.0.0.1:3011/udf` 即可。
 - 端点：`GET /udf/config`、`/udf/time`、`/udf/symbols?symbol=`、`/udf/search?query=&type=&exchange=&limit=`、`/udf/history?symbol=&resolution=&from=&to=&countback=`。
 - symbol：`BINANCE:BTCUSDT`（binance UM futures）或 `DUKASCOPY:EURUSD`；裸交易对默认按 futures 处理。`Spot` 本地无数据，不对外暴露。
-- resolution：UDF 分钟数映射到本地周期，例如 `1→1m`、`60→1h`、`240→4h`、`1D→1d`；dukascopy 对应 `1→M1`、`60→H1`、`1D→D1`。`/udf/symbols` 会按该交易对实际存在的周期返回 `supported_resolutions`。
-- `/udf/history` 的 `from/to` 是**秒级、闭区间**；返回 `{s:"ok",t,o,h,l,c,v}`，其中 `t` 也是秒。无数据返回 `{s:"no_data"}`，非法 symbol/resolution 返回 `{s:"error",errmsg}`。
+- resolution：UDF 分钟数映射到本地周期，例如 `1→1m`、`60→1h`、`240→4h`、`1D→1d`、`3D→3d`、`1W→1w`、`1M→1mo`；dukascopy 对应 `1→M1`、`60→H1`、`1D→D1`。`/udf/symbols` 会按该交易对实际存在的周期返回 `supported_resolutions`，有周/月数据时同时给出 `has_weekly_and_monthly` 与 `weekly_multipliers`/`monthly_multipliers`。
+- `/udf/history` 的 `from` 含、`to` **不含**，均为秒级；返回 `{s:"ok",t,o,h,l,c,v}`，其中 `t` 也是秒。`countback` 优先于 `from`（出现即忽略 `from`，从 `to` 往回数）。窗口为空返回 `{s:"no_data"}`，若过去有数据则带 `nextTime`；非法 symbol/resolution 返回 `{s:"error",errmsg}`。
+- `pricescale` 由该交易对最粗周期的最近 200 根 OHLC 小数位推导，静态值只作下限；`minmov` 恒为 1，即 tick = `1/pricescale`。
+- `session`：crypto 为 `24x7`；dukascopy 为 `0000-0000`（周一到周五，`Etc/UTC`）。
 - 单次最多 10000 根；`countback` 用于只要最近 N 根（`from/to` 可为 0）。时间过滤仍在 blocking 线程池执行，读盘结果走现有 moka 缓存。
-- 回归测试：`cargo test -p tradingview-backend --test udf_test`，覆盖五个端点、秒级时间、闭区间边界、`no_data` 与非法 resolution。
+- 代码结构：`src/app/udf/{symbol,resolution,history,price,protocol,handlers}.rs`，handler 只做参数解析与响应映射，读盘全部走 `spawn_blocking`。
+- 回归测试：`cargo test -p tradingview-backend --test udf_test`，覆盖五个端点、秒级时间、`to` 右开边界、`no_data` 与非法 resolution；`--test udf_contract_test` 逐字段锁定 JSON 契约；官方语义依据见 `./STEP.d/02-udf-contract.md`。
+- 重构范围与协议修复清单见 `./STEP.md`。
 
 状态数据与行情文件分离：行情仍然只读 zip/bi5，SQLite 只存研究终端的 UI 状态。默认路径 `<data_dir>/tradingview.db`，启动时幂等执行 `migrations/001_init.sql`，并开启 WAL。
 
@@ -185,6 +192,7 @@ src/app/mod.rs      # run(config)：校验/状态/路由/CORS/静态/serve/优�
 src/app/routes.rs   # AppState(DataLoader + 状态库) + ApiResponse + 行情/状态路由 + 穿越防护
 src/app/data_loader.rs # MarketType + KlineColumns(SoA) + DataLoader：两个 reader + moka
 src/app/state.rs    # StateStore：layouts/drawings/preferences + 限额校验 + SQLite
+src/app/udf/        # UDF：symbol/resolution/history/price/protocol/handlers
 migrations/001_init.sql # layouts/drawings/preferences 表
 src/config.rs       # Config{host/port/data_dir/db_path/frontend_dir/cors_origins} + load/load_from + validate
 src/error.rs        # AppError(Io/Config/ConfigRead/ConfigParse/Data/State/InvalidAddr, non_exhaustive)

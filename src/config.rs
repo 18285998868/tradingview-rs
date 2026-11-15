@@ -54,7 +54,7 @@ impl Default for Config {
 impl Config {
     /// 从配置文件读取配置。
     ///
-    /// 路径优先级（见 [`default_config_path`]）。
+    /// 路径优先级（见 `default_config_path`）。
     ///
     /// # Errors
     /// - 文件不存在或不可读 → [`AppError::ConfigRead`]
