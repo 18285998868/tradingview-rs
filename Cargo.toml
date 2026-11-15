@@ -16,7 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 axum = "0.8"
-tower-http = { version = "0.7", features = ["cors", "fs"] }
+tower-http = { version = "0.7", features = ["cors", "fs", "compression-gzip"] }
 toml = "1.1"
 dotenvy = "0.15"
 moka = { version = "0.12", default-features = false, features = ["sync"] }
@@ -38,6 +38,8 @@ uuid = { version = "1.28.0", features = ["v4"] }
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 zip = { version = "9", features = ["deflate"] }
+# 集成测试要解开 gzip 响应；zip 已经依赖同一个 flate2，不新增构建图里的 crate。
+flate2 = "1"
 
 [profile.release]
 lto = "fat"

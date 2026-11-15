@@ -12,6 +12,8 @@
 - `DataLoader` 缓存改为按字节计权：权重取六列容量之和（约 48 字节/bar），上限 2 GiB，替换原来的 200 条上限；过期策略改为 `time_to_idle` 10 分钟 + `time_to_live` 30 分钟，替换原来的 5 分钟 TTL。
 - 同一 key 的并发未命中改为 single-flight：`try_get_with` 只让一个线程读盘，其余请求等它的结果；错误经可克隆的 `LoadError` 分发，`NotFound`/`InvalidParam` 的 404/400 分类保持不变。
 - `list_pairs` / `list_timeframes` 的目录扫描结果加 60 秒 TTL 缓存（交易对按市场、周期按市场 + 交易对），`/api/pairs`、`/api/timeframes`、`/udf/search`、`/udf/symbols` 不再每次都递归 `read_dir`；扫描失败不入缓存，`invalidate_cache` 同时清空 K 线与目录缓存。
+- 开启 gzip 响应压缩（`tower-http` 的 `compression-gzip`，`Fastest` 级别）：`/api/klines` 1m 全量 4.3 MB → 1.3 MB，release 下多花约 5–10 ms CPU；<32 字节与图片/SSE 响应不压。
+- 新增依赖：`async-compression`（`tower-http` 的压缩实现），`Cargo.lock` 随之更新；`flate2` 只作为 dev-dependency 用于测试解压。
 
 ### Added
 
@@ -21,3 +23,5 @@
 - 目录缓存测试：扫描结果在 TTL 内复用、`invalidate_cache` 后立刻可见、按市场分键。
 - `STEP.d/03-kline-cache.md`：缓存硬化的设计取舍与验证命令。
 - `STEP.d/04-catalog-cache.md`：目录扫描缓存的设计与验证。
+- `STEP.d/05-compression.md`：gzip 级别取舍与 ETag 决策。
+- `tests/http_compression_test.rs`：gzip 往返字节相等、小响应不压、`identity` 不压。

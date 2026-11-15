@@ -8,6 +8,7 @@ pub mod udf;
 pub use routes::AppState;
 
 use axum::Router;
+use tower_http::compression::{CompressionLayer, CompressionLevel};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
 
@@ -100,7 +101,12 @@ pub async fn run(config: &Config) -> Result<(), AppError> {
 
     let app: Router = routes::create_router(app_state)
         .layer(setup_cors(&config.cors_origins))
-        .fallback_service(ServeDir::new(&frontend_dir).append_index_html_on_directories(true));
+        .fallback_service(ServeDir::new(&frontend_dir).append_index_html_on_directories(true))
+        // 压缩放最外层（必须在 `fallback_service` 之后），API 的 JSON 与前端
+        // 静态资源都会压；tower-http 默认只压 >32 字节且非图片/SSE/gRPC 的响应。
+        // 用 Fastest：这是本地优先的服务，回环带宽不是瓶颈，默认级别在 4 MB
+        // 级别的 JSON 上要多花几十毫秒 CPU，换来的比率提升不值。
+        .layer(CompressionLayer::new().quality(CompressionLevel::Fastest));
 
     let addr_str = format!("{}:{}", config.host, config.port);
     let addr =

@@ -34,6 +34,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items
 - 协议修复清单（F1–F3）：`./STEP.d/02-udf-contract.md`
 - 阶段二 缓存硬化（A1）：`./STEP.d/03-kline-cache.md`
 - 阶段二 目录缓存（A2）：`./STEP.d/04-catalog-cache.md`
+- 阶段二 响应压缩（A3）：`./STEP.d/05-compression.md`
 - 变更记录：`./CHANGELOG.md`
 
 ## 模块五 冒烟

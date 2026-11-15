@@ -12,7 +12,7 @@
 
 - rust（后端）/ TypeScript（前端）
 - edition = "2024"，工具链由 `rust-toolchain.toml` 固定为 `channel = "stable"`（永远用最新 stable，与仓库惯例一致；本机默认的 1.88 低于依赖链要求，裸 `cargo build` 会失败）
-- HTTP：axum 0.8 + tower-http 0.7（cors/fs）
+- HTTP：axum 0.8 + tower-http 0.7（cors/fs/compression-gzip）
 - 数据：binance-core 0.2.0 + dukascopy-core 0.2.0（path 依赖 data-reader workspace，分别读 binance zip / dukascopy bi5）+ moka 0.12（sync 缓存）
 - 前端：vite 6 + lightweight-charts 5.2 + lightweight-charts-drawing 0.6 + technicalindicators 3
 - 状态库：rusqlite 0.40（bundled SQLite）+ uuid 1（布局 ID）
@@ -104,6 +104,7 @@ frontend/           # 前端工程：src/{api,app,chart,indicators,main,types} +
 - 缓存用 **SoA 列集** `KlineColumns`（`time/open/high/low/close/volume` 六条 `Vec`）：reader 本身就是列存储，中间层再存 `Vec<Kline>` 会多出 6 份结构体拷贝。
 - 缓存预算按字节而不是条数：权重取六列 `Vec::capacity` 之和（约 48 字节/bar），上限 2 GiB；条目空闲 10 分钟回收，最长存活 30 分钟（归档由外部下载器更新，TTL 给"新数据最迟多久可见"一个上界）。同一 key 的并发未命中由 moka `try_get_with` 收敛成一次读盘，其余请求等它的结果。
 - 目录扫描（`list_pairs` / `list_timeframes`）另有一级 60 秒 TTL 缓存，键分别是市场、市场 + 交易对；否则 `/api/pairs`、`/udf/search`、`/udf/symbols` 每次请求都要递归 `read_dir` 并逐个品种探测数据文件。
+- 响应压缩：客户端带 `Accept-Encoding: gzip` 时由 tower-http 压缩（`Fastest` 级别，只压 >32 字节且非图片/SSE/gRPC 的响应）。实测 1m 全量 4.3 MB → 1.3 MB，release 下多花约 5–10 ms CPU；没有用默认压缩级别，因为本地回环带宽不是瓶颈，默认级别的 CPU 开销换不回相应的传输收益。
 - 时间过滤用二分（`partition_point`）定位窗口，只拷贝窗口内的 bar；`limit` 取窗口内**最后** N 根。
 
 ### 并发模型（阻塞 IO 不占 worker）
