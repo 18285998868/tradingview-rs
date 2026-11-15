@@ -13,7 +13,7 @@
 - rust（后端）/ TypeScript（前端）
 - edition = "2024"，工具链由 `rust-toolchain.toml` 固定为 `channel = "stable"`（永远用最新 stable，与仓库惯例一致；本机默认的 1.88 低于依赖链要求，裸 `cargo build` 会失败）
 - HTTP：axum 0.8 + tower-http 0.7（cors/fs）
-- 数据：binance-data-reader 0.1.0 + dukascopy-data-reader 0.1.0（workspace path 依赖，分别读 binance zip / dukascopy bi5）+ moka 0.12（sync 缓存）
+- 数据：binance-core 0.2.0 + dukascopy-core 0.2.0（path 依赖 data-reader workspace，分别读 binance zip / dukascopy bi5）+ moka 0.12（sync 缓存）
 - 前端：vite 6 + lightweight-charts 5.2 + lightweight-charts-drawing 0.6 + technicalindicators 3
 - 状态库：rusqlite 0.40（bundled SQLite）+ uuid 1（布局 ID）
 - 配置：`config/config.toml` + serde（derive）
@@ -110,7 +110,7 @@ tokio 的 worker 线程只做调度。读 zip（实测 52ms）这类同步重活
 - `/api/layouts|drawings|preferences`：所有 SQLite 操作同样走 `spawn_blocking`；连接由 `Mutex<Connection>` 串行化（本地单用户，写少读多）。
 - blocking 线程里的 panic 会被 tokio 捕获成 `JoinError`，统一收敛成 500，不会变成进程级故障。
 
-> 策略回测后端已拆到独立仓库 [`vta-bt`](../../vta-bt)；本服务的 `/api/strategy`、`/api/strategies` 与 `src/app/strategy.rs` 已移除，前端策略面板暂不可用，待后续重构。
+> 策略回测后端已拆到独立仓库 [`vta-bt`](../vta-bt)；本服务的 `/api/strategy`、`/api/strategies` 与 `src/app/strategy.rs` 已移除，前端策略面板暂不可用，待后续重构。
 
 ### 回放（Replay）
 
@@ -193,7 +193,7 @@ host = "127.0.0.1"           # 可选，默认 127.0.0.1，监听地址
 port = 3001                  # 可选，默认 3001
 data_dir = "path/to/data"   # 必填，无默认，数据根
 db_path = "path/to/data/tradingview.db"  # 可选，默认 <data_dir>/tradingview.db
-frontend_dir = "/data/vta-bt/tradingview/frontend/dist"   # 可选，默认 <workspace>/frontend/dist
+frontend_dir = "/data/tradingview-rs/frontend/dist"   # 可选，默认 <workspace>/frontend/dist
 cors_origins = []           # 可选，默认 [] = 全放行（仅本地开发）
 ```
 

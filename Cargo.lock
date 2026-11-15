@@ -153,7 +153,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "binance-data-reader"
+name = "binance-core"
 version = "0.2.0"
 dependencies = [
  "chrono",
@@ -456,7 +456,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 
 [[package]]
-name = "dukascopy-data-reader"
+name = "dukascopy-core"
 version = "0.2.0"
 dependencies = [
  "chrono",
@@ -1611,10 +1611,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
- "binance-data-reader",
+ "binance-core",
  "chrono",
  "dotenvy",
- "dukascopy-data-reader",
+ "dukascopy-core",
  "moka",
  "rusqlite",
  "serde",

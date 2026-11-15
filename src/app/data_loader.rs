@@ -94,13 +94,13 @@ pub enum DataError {
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),
 
-    /// binance-data-reader 读取/解析失败。
+    /// binance-core 读取/解析失败。
     #[error("binance reader error: {0}")]
-    BinanceReader(#[from] binance_data_reader::Error),
+    BinanceReader(#[from] binance_core::Error),
 
-    /// dukascopy-data-reader 读取/解析失败。
+    /// dukascopy-core 读取/解析失败。
     #[error("dukascopy reader error: {0}")]
-    DukascopyReader(#[from] dukascopy_data_reader::ReaderError),
+    DukascopyReader(#[from] dukascopy_core::ReaderError),
 
     /// 数据内容不完整（例如缺少必需列）。
     #[error("data error: {0}")]
@@ -258,31 +258,31 @@ impl KlineColumns {
     }
 }
 
-impl TryFrom<binance_data_reader::Table> for KlineColumns {
+impl TryFrom<binance_core::Table> for KlineColumns {
     type Error = DataError;
 
-    fn try_from(table: binance_data_reader::Table) -> Result<Self, Self::Error> {
+    fn try_from(table: binance_core::Table) -> Result<Self, Self::Error> {
         fn column<'a, T>(
-            table: &'a binance_data_reader::Table,
+            table: &'a binance_core::Table,
             name: &str,
-            get: impl Fn(&'a binance_data_reader::Table, &str) -> Option<&'a [T]>,
+            get: impl Fn(&'a binance_core::Table, &str) -> Option<&'a [T]>,
         ) -> Result<&'a [T], DataError> {
             get(table, name)
                 .ok_or_else(|| DataError::Data(format!("kline table is missing `{name}` column")))
         }
 
-        let time = column(&table, "open_time", binance_data_reader::Table::i64)?.to_vec();
-        let open = column(&table, "open", binance_data_reader::Table::f64)?.to_vec();
-        let high = column(&table, "high", binance_data_reader::Table::f64)?.to_vec();
-        let low = column(&table, "low", binance_data_reader::Table::f64)?.to_vec();
-        let close = column(&table, "close", binance_data_reader::Table::f64)?.to_vec();
-        let volume = column(&table, "volume", binance_data_reader::Table::f64)?.to_vec();
+        let time = column(&table, "open_time", binance_core::Table::i64)?.to_vec();
+        let open = column(&table, "open", binance_core::Table::f64)?.to_vec();
+        let high = column(&table, "high", binance_core::Table::f64)?.to_vec();
+        let low = column(&table, "low", binance_core::Table::f64)?.to_vec();
+        let close = column(&table, "close", binance_core::Table::f64)?.to_vec();
+        let volume = column(&table, "volume", binance_core::Table::f64)?.to_vec();
         Ok(Self::from_parts((time, open, high, low, close, volume)))
     }
 }
 
-impl From<dukascopy_data_reader::KlineColumns> for KlineColumns {
-    fn from(raw: dukascopy_data_reader::KlineColumns) -> Self {
+impl From<dukascopy_core::KlineColumns> for KlineColumns {
+    fn from(raw: dukascopy_core::KlineColumns) -> Self {
         let parts = raw.into_parts();
         Self::from_parts((
             parts.time,
@@ -406,7 +406,7 @@ impl DataLoader {
                 if !has_data_files(&pair_dir, market_type.data_ext()) {
                     return Ok(vec![]);
                 }
-                dukascopy_data_reader::Timeframe::ALL
+                dukascopy_core::Timeframe::ALL
                     .iter()
                     .map(|timeframe| timeframe.as_str().to_string())
                     .collect()
@@ -481,12 +481,12 @@ impl DataLoader {
         match market_type {
             MarketType::Dukascopy => {
                 timeframe
-                    .parse::<dukascopy_data_reader::Timeframe>()
+                    .parse::<dukascopy_core::Timeframe>()
                     .map_err(|e| DataError::InvalidParam(e.to_string()))?;
             }
             _ => {
                 timeframe
-                    .parse::<binance_data_reader::Interval>()
+                    .parse::<binance_core::Interval>()
                     .map_err(DataError::InvalidParam)?;
             }
         }
@@ -520,28 +520,28 @@ impl DataLoader {
         let cols = match market_type {
             MarketType::Dukascopy => {
                 let timeframe = timeframe
-                    .parse::<dukascopy_data_reader::Timeframe>()
+                    .parse::<dukascopy_core::Timeframe>()
                     .map_err(|e| DataError::InvalidParam(e.to_string()))?;
-                let cfg = dukascopy_data_reader::DataConfig::new(&self.data_dir, pair, timeframe)?;
-                let raw = dukascopy_data_reader::load_columns(&cfg)?;
+                let cfg = dukascopy_core::DataConfig::new(&self.data_dir, pair, timeframe)?;
+                let raw = dukascopy_core::load_columns(&cfg)?;
                 KlineColumns::from(raw)
             }
             _ => {
                 let market = match market_type {
-                    MarketType::Spot => binance_data_reader::Market::Spot,
-                    _ => binance_data_reader::Market::Um,
+                    MarketType::Spot => binance_core::Market::Spot,
+                    _ => binance_core::Market::Um,
                 };
-                let interval: binance_data_reader::Interval =
+                let interval: binance_core::Interval =
                     timeframe.parse().map_err(DataError::InvalidParam)?;
-                let cfg = binance_data_reader::Config::builder(
+                let cfg = binance_core::Config::builder(
                     self.data_dir.join("binance"),
-                    binance_data_reader::Dataset::Klines,
+                    binance_core::Dataset::Klines,
                     pair,
                 )
                 .market(market)
                 .interval(interval)
                 .build()?;
-                KlineColumns::try_from(binance_data_reader::read(&cfg)?.table)?
+                KlineColumns::try_from(binance_core::read(&cfg)?.table)?
             }
         };
         if cols.is_empty() {
