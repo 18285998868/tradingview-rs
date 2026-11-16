@@ -1,7 +1,9 @@
 """双均线只做多引擎（vectorbt 1.2.0）。
 
 信号口径：T 收盘比较 fast/slow 均线，目标仓位在 T+1 开盘执行。实现上把目标
-仓位右移一根 bar，再把开盘价作为 vectorbt 的成交价序列，避免前视。
+仓位右移一根 bar，成交价用当根开盘价，权益按当根收盘价 mark-to-market。
+vectorbt 的 `from_orders` 只有一个价格序列，无法区分成交价与估值价，因此改用
+`from_signals(close=收盘价, price=开盘价)`；未平仓交易也按最后一根收盘价标记。
 """
 
 from __future__ import annotations
@@ -35,6 +37,41 @@ def _safe_float(value: Any) -> float | None:
 def _timestamp_ms(index: pd.DatetimeIndex, position: int) -> int:
     stamp = index[int(position)]
     return int(round(stamp.timestamp() * 1000.0))
+
+
+def _equity_from_orders(
+    orders: pd.DataFrame,
+    close: np.ndarray,
+    initial_balance: float,
+) -> np.ndarray:
+    """按订单记录重建逐 bar 权益。
+
+    vectorbt 的 `value()` / `assets()` / `cash()` 在 485 万根 1m bar 上会重复
+    模拟并花掉数十秒；这里直接消费订单记录，一次线性填充。策略只做全仓进出，
+    买单后现金归零，卖单后现金为成交额减手续费。
+    """
+
+    count = close.size
+    cash = np.empty(count, dtype=np.float64)
+    qty = np.empty(count, dtype=np.float64)
+    current_cash = float(initial_balance)
+    current_qty = 0.0
+    cursor = 0
+    for row in orders.itertuples(index=False):
+        index = int(row.idx)
+        if index > cursor:
+            cash[cursor:index] = current_cash
+            qty[cursor:index] = current_qty
+        if int(row.side) == 0:
+            current_qty += float(row.size)
+            current_cash = 0.0
+        else:
+            current_qty = 0.0
+            current_cash = float(row.size) * float(row.price) - float(row.fees)
+        cursor = index
+    cash[cursor:] = current_cash
+    qty[cursor:] = current_qty
+    return cash + qty * close
 
 
 def _select_curve_indices(
@@ -98,43 +135,46 @@ def run_dual_ma(
     fast_ma = close.rolling(fast, min_periods=fast).mean()
     slow_ma = close.rolling(slow, min_periods=slow).mean()
     target = (fast_ma > slow_ma).astype("float64").shift(1).fillna(0.0)
+    long_target = target > 0.0
+    previous_target = long_target.shift(1, fill_value=False)
+    entries = long_target & ~previous_target
+    exits = ~long_target & previous_target
 
-    portfolio = vbt.Portfolio.from_orders(
-        close=frame["open"].astype("float64"),
-        size=target,
-        size_type="targetpercent",
+    portfolio = vbt.Portfolio.from_signals(
+        close=close,
+        entries=entries,
+        exits=exits,
+        price=frame["open"].astype("float64"),
         init_cash=float(initial_balance),
         fees=float(fee_bps) / 10_000.0,
         slippage=float(slippage_bps) / 10_000.0,
         direction="longonly",
     )
 
-    value = portfolio.value()
-    value = value.reindex(frame.index)
-    if value.isna().any():
-        raise EngineError("vectorbt returned an equity series with missing bars")
-    equity_values = value.to_numpy(dtype=np.float64)
-    if not np.isfinite(equity_values).all():
-        raise EngineError("vectorbt returned non-finite equity")
-
-    times = np.asarray(
-        [int(round(stamp.timestamp() * 1000.0)) for stamp in frame.index],
-        dtype=np.int64,
+    close_values = close.to_numpy(dtype=np.float64)
+    equity_values = _equity_from_orders(
+        portfolio.orders.records,
+        close_values,
+        float(initial_balance),
     )
+    if not np.isfinite(equity_values).all():
+        raise EngineError("engine returned non-finite equity")
+
+    times = frame.index.as_unit("ms").asi8.astype(np.int64)
     drawdown = compute_drawdown(times, equity_values)
 
     raw = portfolio.trades.records
-    readable = portfolio.trades.records_readable
     trades: list[dict[str, object]] = []
     trade_pnls: list[float] = []
     trade_returns: list[float] = []
     total_trades = int(len(raw))
     for position in range(min(total_trades, max(0, int(max_trades)))):
         row = raw.iloc[position]
-        label = readable.iloc[position]
         entry_idx = int(row["entry_idx"])
         exit_idx = int(row["exit_idx"])
-        status = str(label["Status"]).lower()
+        # vectorbt TradeStatus: 0=Open, 1=Closed。避免用 records_readable，
+        # 它在百万级时间索引上会重复对齐并花掉十秒。
+        status = "closed" if int(row["status"]) == 1 else "open"
         entry_time = _timestamp_ms(frame.index, entry_idx)
         exit_time = _timestamp_ms(frame.index, exit_idx)
         pnl = _safe_float(row["pnl"])
@@ -149,7 +189,7 @@ def run_dual_ma(
                 "entry_time": entry_time,
                 "exit_time": exit_time,
                 "side": "long",
-                "status": "open" if status == "open" else "closed",
+                "status": status,
                 "entry_price": _safe_float(row["entry_price"]),
                 "exit_price": _safe_float(row["exit_price"]),
                 "qty": _safe_float(row["size"]),

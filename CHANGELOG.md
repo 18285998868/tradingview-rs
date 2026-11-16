@@ -23,6 +23,10 @@
 - `src/app/state.rs`：启动时同时执行 `001_init.sql` 与 `002_backtest.sql`；删除回测运行时级联清理交易、回撤事件与曲线。
 - 前端：原策略面板位置改为回测面板（`frontend/src/backtest.ts`），主图支持买卖点叠加与单独清除；会话与布局 payload 移除 `strategy` 字段。
 - `README.md`、`STEP.md`、`CHANGELOG.md`、`docs/`：同步回测边界、接口、存储、限制与验证方式。
+- `python/backtest_worker/data.py`：归档读取从逐行 `csv` 解析改为 pandas C 解析器整块读取，再向量化做有限值/正价格/负成交量/OHLC 包络校验、时区过滤、日归档覆盖与拼接；1m 全量约 485 万行的读取降到秒级。
+- `python/backtest_worker/engine.py`：成交与估值分离，改用 `from_signals(close=收盘价, price=开盘价)`，并按订单记录线性重建逐 bar 收盘权益；移除 `trades.records_readable`（约 10.3 秒）与逐元素 `Timestamp.timestamp()`。
+- `python/backtest_worker/cli.py`：参数扫描在多组时用 fork 进程池并行，默认最多 4 个，`TRADINGVIEW_WORKERS` 可覆盖；保持参数顺序，单组失败仍只影响该组。
+- `STEP.d/06-frontend-incremental.md`：验证命令改用仓库内 `frontend/node_modules`，不再引用临时目录。
 
 ### Added
 
@@ -40,7 +44,10 @@
 - `src/incremental.ts` + `scripts/chart-incremental.test.mjs`：图表尾部增量判定的纯函数与测试（追加、最后一根改写、缩短/乱序回退、指标前缀兼容）。
 - `STEP.d/06-frontend-incremental.md`：前端增量更新范围与指标重算成本。
 - `python/backtest_worker/`：Binance 现货 zip 读取（12 个原生周期，2025 起的微秒时间戳归一为毫秒）、双均线只做多 vectorbt 1.2.0 引擎（T 收盘信号、T+1 开盘成交）、回撤事件与指标、保端点降采样、参数扫描与 CLI；单组失败只标记该组。
-- `python/tests/`：24 个 unittest，覆盖数据读取（含 2025 起微秒时间戳）、引擎无前视、回撤事件、指标公式与 CLI 契约。
+- `python/tests/`：35 个 unittest，覆盖数据读取（含 2025 起微秒时间戳）、引擎无前视、收盘权益、成本公式、回撤事件、指标公式、降采样、确定性与 CLI 契约。
+- `python/tests/reference.py`：不依赖 vectorbt 的 pandas/numpy 参考实现，对合成随机游走、固定净值序列与真实 BTCUSDT 1h 数据逐笔对账。
+- `docs/validation.md`：四层验证报告，记录正确性对账、性能基准、浏览器指标、工具链与安全的方法、数据、偏差和未覆盖项。
+- 前端 `performance.mark/measure`：`tv:first-screen` 与 `tv:tf-switch:<timeframe>`，用于首屏和周期切换计时。
 - `src/app/backtest/`：模型与参数网格、任务状态机与并发许可、Python 子进程（超时/日志/失败重试）、SQLite 事务落库、对比警告与时间并集、CSV、HTTP 路由。
 - `migrations/002_backtest.sql`：`backtest_runs`/`backtest_trades`/`backtest_drawdown_events`/`backtest_equity`/`backtest_underwater` 五张表与索引。
 - `/api/backtests*`：config/提交/列表/详情/日志/重试/删除/对比/CSV；参数扫描共享 `batch_id`，上限 100 组；对比 2–10 个运行，少于 2 或多于 10 返回 400。
@@ -49,3 +56,8 @@
 - `SPEC.md`、`docs/adr/0001-rust-python-vectorbt.md`、`STEP.d/08-backtest.md`、`docs/backtest.md`：冻结规格、架构裁决与阶段文档。
 - `config/config.example.toml`：补 `[backtest]` 全字段示例。
 - `.gitignore`：忽略 `__pycache__/` 与 `*.pyc`。
+
+### Fixed
+
+- 回测权益在开盘价 mark-to-market：旧实现 `from_orders(targetpercent)` 只有一个价格序列，成交价与估值价都用开盘价，导致权益、回撤与收益偏差；现按收盘价重建权益，新增 `test_equity_is_marked_to_close_not_open` 回归测试。
+- 对比面板 wrapper 与入口按钮重复使用 `id="bt-compare"`；wrapper 改为 `bt-compare-root`，按钮保留原 id，避免 DOM 查询命中错误节点。

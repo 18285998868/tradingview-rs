@@ -314,7 +314,8 @@ cd frontend && npm run build                       # 产物进 frontend/dist，�
 cd python && /data/vbt/.venv/bin/python -m unittest discover -s tests -v
 ```
 
-回测真实数据冒烟与接口验证见 [`./docs/backtest.md`](./docs/backtest.md)，服务冒烟脚本见 [`./STEP.md`](./STEP.md) 模块五。
+回测真实数据冒烟与接口验证见 [`./docs/backtest.md`](./docs/backtest.md)，四层验证结果见
+[`./docs/validation.md`](./docs/validation.md)，服务冒烟脚本见 [`./STEP.md`](./STEP.md) 模块五。
 
 > 工具链由 `rust-toolchain.toml` 固定为 `channel = "stable"`，上述命令无需手工指定版本号。
 >

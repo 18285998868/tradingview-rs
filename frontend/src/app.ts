@@ -360,6 +360,21 @@ export class App {
     await this.flushDrawings();
   }
 
+  /**
+   * 等两帧后再记录性能标记，确保图表绘制进入浏览器合成阶段。
+   *
+   * 只传 name 时写 `performance.mark`（首屏耗时）；同时传 start 时写
+   * `performance.measure`（周期切换耗时）。
+   */
+  private markAfterPaint(name: string, start?: number): void {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        if (start === undefined) performance.mark(name);
+        else performance.measure(name, { start, end: performance.now() });
+      });
+    });
+  }
+
   // ---- 回放 ----
 
   private activeKlines(): Kline[] {
@@ -921,6 +936,7 @@ export class App {
         this.bindChart();
         this.chart.setData(klines.klines);
         this.refreshIndicators();
+        this.markAfterPaint('tv:first-screen');
         void this.loadQuality(this.marketSelect.value, this._pair, this._timeframe);
       }
       this.infoEl.textContent = this.dataInfoText();
@@ -1060,12 +1076,14 @@ export class App {
   }
 
   private async onTimeframeChange(): Promise<void> {
+    const started = performance.now();
     this.invalidateQualityBadge();
     await this.flushPendingSaves();
     this._timeframe = this.timeframeSelect.value;
     this.activeIndicators = [];
     this.teardownChart('加载中...');
     if (this._timeframe) await this.loadKlines();
+    this.markAfterPaint(`tv:tf-switch:${this._timeframe}`, started);
     this.scheduleSave();
   }
 

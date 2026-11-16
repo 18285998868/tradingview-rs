@@ -244,7 +244,7 @@ export class BacktestPanel {
         </section>
         <section class="bt-section" id="bt-compare-section" hidden>
           <div class="bt-section-title"><span>对比</span></div>
-          <div id="bt-compare"></div>
+          <div id="bt-compare-root"></div>
         </section>
       </div>
     `;
@@ -254,7 +254,7 @@ export class BacktestPanel {
     this.detailSection = panel.querySelector('#bt-detail-section')!;
     this.detailEl = panel.querySelector('#bt-detail')!;
     this.compareSection = panel.querySelector('#bt-compare-section')!;
-    this.compareEl = panel.querySelector('#bt-compare')!;
+    this.compareEl = panel.querySelector('#bt-compare-root')!;
     this.contextEl = panel.querySelector('#bt-context')!;
     this.fastInput = panel.querySelector('#bt-fast')!;
     this.slowInput = panel.querySelector('#bt-slow')!;

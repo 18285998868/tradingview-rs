@@ -58,15 +58,15 @@ cd frontend
 npm test
 ```
 
-远程 CachyOS 没有 npm，验证时用临时 `/data/node_modules`（typescript 5.9.3、lightweight-charts 5.2.1、technicalindicators 3.1.0、vite 6.4.2）：
+远程 CachyOS 没有 npm，验证直接使用 `frontend/node_modules`（typescript 5.9.3、lightweight-charts 5.2.1、technicalindicators 3.1.0、vite 6.4.2；已被 gitignore）：
 
 ```bash
 cd frontend
-node /data/node_modules/typescript/bin/tsc -p tsconfig.json --noEmit
+node node_modules/typescript/bin/tsc -p tsconfig.json --noEmit
 node --test scripts/*.test.mjs
 ```
 
-`tsc --noEmit` 通过，13 个前端测试全部通过。临时目录不进入仓库。
+`tsc --noEmit` 通过，19 个前端测试全部通过。`node_modules` 不进入仓库。
 
 `npm test` 跑两个文件：
 
@@ -75,7 +75,7 @@ node --test scripts/*.test.mjs
 
 ## 浏览器冒烟
 
-构建：Vite 6.4.2（临时 `node_modules` 放在仓库外，不进入仓库），104 个模块，产物 `index-*.js` 486.58 kB（gzip 148.74 kB）、`index-*.css` 6.09 kB（gzip 1.57 kB）。
+构建：Vite 6.4.2（`frontend/node_modules` 已被 gitignore），104 个模块，产物 `index-*.js` 486.58 kB（gzip 148.74 kB）、`index-*.css` 6.09 kB（gzip 1.57 kB）。
 
 运行：release 二进制 + `/tmp` 状态库 + headless Firefox（geckodriver 0.37.1），预置 `last_session` 为 `futures/BTCUSDT/1h`，指标 SMA + MACD。
 

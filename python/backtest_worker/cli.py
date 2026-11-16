@@ -116,6 +116,97 @@ def validate_request(request: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+_WORKER_FRAME: Any = None
+_WORKER_SETTINGS: dict[str, Any] | None = None
+
+
+def _worker_count(count: int) -> int:
+    """参数扫描的进程数；默认最多 4 个，可用环境变量覆盖。"""
+
+    if count <= 1:
+        return 1
+    raw = os.environ.get("TRADINGVIEW_WORKERS")
+    if raw is not None:
+        try:
+            value = int(raw)
+        except ValueError as exc:
+            raise ValueError(f"TRADINGVIEW_WORKERS must be an integer, got {raw!r}") from exc
+        return max(1, min(value, count))
+    return max(1, min(4, os.cpu_count() or 1, count))
+
+
+def _run_one(
+    frame: Any,
+    params: dict[str, int],
+    normalized: dict[str, Any],
+) -> dict[str, Any]:
+    print(
+        f"running {normalized['pair']} {normalized['timeframe']} "
+        f"fast={params['fast']} slow={params['slow']} bars={len(frame)}",
+        flush=True,
+    )
+    try:
+        return run_dual_ma(
+            frame=frame,
+            params=params,
+            timeframe=normalized["timeframe"],
+            fee_bps=normalized["fee_bps"],
+            slippage_bps=normalized["slippage_bps"],
+            initial_balance=normalized["initial_balance"],
+            max_curve_points=normalized["max_curve_points"],
+            max_trades=normalized["max_trades"],
+        )
+    except Exception as exc:  # 单组失败不拖垮整批，交由 Rust 标记该运行 failed
+        traceback.print_exc()
+        return {
+            "params": params,
+            "params_text": f"fast={params['fast']},slow={params['slow']}",
+            "bars": len(frame),
+            "first_time": int(frame.index[0].timestamp() * 1000),
+            "last_time": int(frame.index[-1].timestamp() * 1000),
+            "metrics": None,
+            "trades": [],
+            "trades_truncated": False,
+            "drawdown_events": [],
+            "equity": [],
+            "underwater": [],
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
+def _worker_run(params: dict[str, int]) -> dict[str, Any]:
+    if _WORKER_FRAME is None or _WORKER_SETTINGS is None:
+        raise RuntimeError("worker frame is not initialized")
+    return _run_one(_WORKER_FRAME, params, _WORKER_SETTINGS)
+
+
+def _run_params(frame: Any, normalized: dict[str, Any]) -> list[dict[str, Any]]:
+    """执行一批参数；多组时用 fork 进程并行，保持参数顺序。"""
+
+    params_list: list[dict[str, int]] = normalized["params_list"]
+    workers = _worker_count(len(params_list))
+    if workers <= 1:
+        return [_run_one(frame, params, normalized) for params in params_list]
+
+    import multiprocessing
+
+    try:
+        context = multiprocessing.get_context("fork")
+    except ValueError:
+        # 平台没有 fork 时退回串行，避免把整个行情表 pickle 到子进程。
+        return [_run_one(frame, params, normalized) for params in params_list]
+
+    global _WORKER_FRAME, _WORKER_SETTINGS
+    _WORKER_FRAME = frame
+    _WORKER_SETTINGS = normalized
+    try:
+        with context.Pool(processes=workers) as pool:
+            return pool.map(_worker_run, params_list, chunksize=1)
+    finally:
+        _WORKER_FRAME = None
+        _WORKER_SETTINGS = None
+
+
 def execute(request: dict[str, Any]) -> dict[str, Any]:
     """执行请求，返回 worker 结果。"""
 
@@ -136,41 +227,7 @@ def execute(request: dict[str, Any]) -> dict[str, Any]:
         normalized["start_ms"],
         normalized["end_ms"],
     )
-    runs: list[dict[str, Any]] = []
-    for params in normalized["params_list"]:
-        print(
-            f"running {normalized['pair']} {normalized['timeframe']} "
-            f"fast={params['fast']} slow={params['slow']} bars={loaded.rows}",
-            flush=True,
-        )
-        try:
-            run = run_dual_ma(
-                frame=loaded.frame,
-                params=params,
-                timeframe=normalized["timeframe"],
-                fee_bps=normalized["fee_bps"],
-                slippage_bps=normalized["slippage_bps"],
-                initial_balance=normalized["initial_balance"],
-                max_curve_points=normalized["max_curve_points"],
-                max_trades=normalized["max_trades"],
-            )
-        except Exception as exc:  # 单组失败不拖垮整批，交由 Rust 标记该运行 failed
-            traceback.print_exc()
-            run = {
-                "params": params,
-                "params_text": f"fast={params['fast']},slow={params['slow']}",
-                "bars": loaded.rows,
-                "first_time": loaded.first_ms,
-                "last_time": loaded.last_ms,
-                "metrics": None,
-                "trades": [],
-                "trades_truncated": False,
-                "drawdown_events": [],
-                "equity": [],
-                "underwater": [],
-                "error": f"{type(exc).__name__}: {exc}",
-            }
-        runs.append(run)
+    runs = _run_params(loaded.frame, normalized)
 
     return {
         "worker_version": WORKER_VERSION,

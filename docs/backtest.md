@@ -2,7 +2,8 @@
 
 本文说明回测子系统的边界、接口、状态机与验证方式。架构裁决见
 [`./adr/0001-rust-python-vectorbt.md`](./adr/0001-rust-python-vectorbt.md)；
-分阶段实现记录见 [`../STEP.d/08-backtest.md`](../STEP.d/08-backtest.md)。
+分阶段实现记录见 [`../STEP.d/08-backtest.md`](../STEP.d/08-backtest.md)；
+四层验证的方法、数据与偏差见 [`./validation.md`](./validation.md)。
 
 ## 范围
 
@@ -130,19 +131,35 @@ CSV、日志、重试与删除。点击运行详情会把买卖点叠加到主�
 # Rust 契约与状态机（假 worker）
 cargo test --test backtest_test
 
-# Python 数据读取、引擎、回撤、指标、CLI
-cd python && /data/vbt/.venv/bin/python -m unittest discover -s tests -v
+# Python 数据读取、引擎、回撤、指标、CLI 与独立参考实现对账
+cd python
+TRADINGVIEW_REAL_DATA=/data/data /data/vbt/.venv/bin/python -m unittest discover -s tests -v
 
 # 前端类型检查与单测
 cd frontend && npm run build
 cd frontend && npm test
 ```
 
+`python/tests/reference.py` 是不依赖 vectorbt 的 pandas/numpy 参考实现，覆盖成本
+公式、无前视、收盘权益、回撤事件、降采样与确定性；真实数据用例由
+`TRADINGVIEW_REAL_DATA` 门控。完整结果与性能、浏览器、安全验证见
+[`./validation.md`](./validation.md)。
+
 真实数据冒烟需要配置 `python_bin` 与 `worker_dir`，然后提交一次单组回测与一次
 参数扫描，检查详情、日志、对比、CSV、重试与删除。
 
 ## 已知限制
 
-- 规格中的性能与导入时间阈值（†）尚未按基准数据校准，不能视为已验证。
+- 性能阈值（AC-P01/P02/P03）已在 2026-11-16 的基准机验证；结论限于单机、热页
+  缓存与只读压测，不能外推到冷盘或更低配置，见 `./validation.md`。
+- 首屏只加载 400 根（200 根初始 + 200 根右缘预取），默认可视约 50 根；规格要求
+  500 根视窗、前后各 500 根预取，尚未对齐。
+- 周期切换后视口重置到最新，未保持同一可视时间范围。
+- K 线区间选择未实现；`minBarSpacing=0.5` 使可视上限约 2,800 根。
+- 服务没有内置认证，默认只监听回环；开公网必须另加认证与访问控制。
+- 请求体上限硬编码为 2 MiB，不可配置。
+- Docker Compose 部署与数据库快照恢复未提供/未演练。
+- 参数扫描使用 fork 进程池；Python 3.14 在多线程进程中 fork 会告警，未来需要
+  改 `spawn` 并共享行情表。
 - 首版没有策略插件机制；新增策略需要同时改 Rust 契约、Python worker 与前端表单。
 - 对比视图命名保存（P1）未实现。
