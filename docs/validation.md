@@ -627,10 +627,18 @@ Cargo 依赖 `../data-reader/crates/binance-core` 与 `dukascopy-core`。Compose
   再 `down` + `up` 重建容器与网络后仍一致。
 - 容器内复核：uid 10001，vectorbt 1.2.0 / numpy 2.5.5 / pandas 3.1.1；配置为
   `host=0.0.0.0`、`db_path=/state/tradingview.db`、worker `/app/python`。
+- 2026-11-16 前端排序版更新镜像：`docker compose build` 只重跑运行时 pip 层
+  （`TV_PIP_INDEX_URL` 指向阿里云源，10.5 分钟），后端与前端阶段命中缓存；
+  `docker compose up -d --wait` 后 5 秒 healthy。`/api/health` 200，无令牌
+  `/api/backtests` 401，Bearer 令牌 200；`/` 的 sha256 与 `frontend/dist/index.html`
+  一致（`899249…f80f`），`assets/index-Ctm9ChmA.js` 与 `index-Drb9h2HW.css`
+  逐字节一致，旧 `index-DBl5X4KH.js` 已被替换；状态卷中的 `tradingview.db`、
+  `backtests/` 与既有运行记录保留。
 
 边界：演练在同一台基准机上完成，不是独立物理机；基础镜像已预先拉取；构建期
 需要访问 npm、crates.io 与 PyPI。代理只监听回环时需把 `TV_BUILD_NETWORK` 设为
-`host`。这些限制不影响“空状态卷 + 单条 Compose 命令启动并持久化”的结论。
+`host`；官方 PyPI 慢时用 `TV_PIP_INDEX_URL` 指向镜像站。这些限制不影响
+“空状态卷 + 单条 Compose 命令启动并持久化”的结论。
 
 ## 未覆盖与偏差
 
