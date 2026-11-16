@@ -52,7 +52,7 @@ pub enum MarketType {
     /// binance U 本位合约（`{dir}/binance/data/futures/um/daily/klines/{symbol}/{tf}/*.zip`）。
     #[default]
     Futures,
-    /// binance 现货（本地暂无对应数据）。
+    /// binance 现货（`{dir}/binance/data/spot/daily/klines/{symbol}/{tf}/*.zip`）。
     Spot,
     /// Dukascopy 外汇/贵金属（`{dir}/dukascopy/{symbol}/{yyyy}/{MM}/{dd}/*.bi5`，
     /// 月份 0-based：`00` = 1 月）。
@@ -60,11 +60,12 @@ pub enum MarketType {
 }
 
 impl MarketType {
-    /// 对外暴露的市场类型（= **本地确有数据源**的那些）。
+    /// 对外暴露的市场类型（= **本地确有数据源**的那些），顺序即前端下拉框顺序。
     ///
-    /// `Spot` 变体仍可被解析，但本地没有对应数据，故不对外暴露 ——
-    /// 否则前端会列出一个"选了就是空图 / 404"的选项。
-    pub const SUPPORTED: [MarketType; 2] = [MarketType::Futures, MarketType::Dukascopy];
+    /// `Spot` 置于首位：回测只支持现货归档，默认市场与回测口径保持一致；
+    /// 币本位合约（`futures/cm`）尚未建模，等接入后再进这个列表。
+    pub const SUPPORTED: [MarketType; 3] =
+        [MarketType::Spot, MarketType::Futures, MarketType::Dukascopy];
 
     /// 数据文件扩展名（binance = zip，dukascopy = bi5）。
     fn data_ext(self) -> &'static str {
@@ -531,25 +532,28 @@ impl DataLoader {
     /// - Futures：`daily` 与 `monthly` 两棵归档。reader 会合并两处（同一 UTC 日
     ///   日线优先），发现层也必须同时看：只扫 `daily` 会漏掉仅存在于月度归档的
     ///   品种（已下架合约）和周期（`3d`/`1w`/`1mo`），而 reader 本身能读。
+    /// - Spot：与 `Futures` 同构，两棵归档位于 `{dir}/binance/data/spot`。
     /// - Dukascopy：`{dir}/dukascopy`（周期不是目录，而是文件名里的聚合粒度）。
-    /// - Spot：本地暂无对应数据源，返回空，调用方按空/404 处理。
     fn bases(&self, market_type: MarketType) -> Vec<PathBuf> {
         match market_type {
-            MarketType::Futures => ["daily", "monthly"]
-                .into_iter()
-                .map(|period| {
-                    self.data_dir
-                        .join("binance")
-                        .join("data")
-                        .join("futures")
-                        .join("um")
-                        .join(period)
-                        .join("klines")
-                })
-                .collect(),
-            MarketType::Spot => Vec::new(),
+            MarketType::Futures => self.binance_bases(&["futures", "um"]),
+            MarketType::Spot => self.binance_bases(&["spot"]),
             MarketType::Dukascopy => vec![self.data_dir.join("dukascopy")],
         }
+    }
+
+    /// binance 某市场在 `daily` 与 `monthly` 下的两棵 kline 归档根。
+    fn binance_bases(&self, market: &[&str]) -> Vec<PathBuf> {
+        ["daily", "monthly"]
+            .into_iter()
+            .map(|period| {
+                let mut path = self.data_dir.join("binance").join("data");
+                for segment in market {
+                    path = path.join(segment);
+                }
+                path.join(period).join("klines")
+            })
+            .collect()
     }
 
     /// 列出可用交易对（字典序去重）。
@@ -810,8 +814,26 @@ impl DataLoader {
                 )
                 .market(market)
                 .interval(interval)
+                // 官方 spot 归档存在单行损坏（例如 1h 2020-12 的 close_time 与
+                // 周期不符）：现货读取宁可丢行并告警，也不要整段 500。合约归档
+                // 维持 Fail，任何异样都直接暴露。
+                .bad_rows(if market_type == MarketType::Spot {
+                    binance_core::BadRowPolicy::Skip
+                } else {
+                    binance_core::BadRowPolicy::Fail
+                })
                 .build()?;
-                KlineColumns::try_from(binance_core::read(&cfg)?.table)?
+                let data = binance_core::read(&cfg)?;
+                if data.report.rows_skipped > 0 {
+                    tracing::warn!(
+                        pair,
+                        timeframe,
+                        skipped = data.report.rows_skipped,
+                        samples = ?data.report.skipped_samples,
+                        "malformed kline rows skipped"
+                    );
+                }
+                KlineColumns::try_from(data.table)?
             }
         };
         if cols.is_empty() {
@@ -897,14 +919,21 @@ mod tests {
     use tempfile::TempDir;
 
     fn binance_kline_dir(dir: &Path, period: &str, pair: &str, timeframe: &str) -> PathBuf {
-        dir.join("binance")
-            .join("data")
-            .join("futures")
-            .join("um")
-            .join(period)
-            .join("klines")
-            .join(pair)
-            .join(timeframe)
+        binance_kline_dir_market(dir, &["futures", "um"], period, pair, timeframe)
+    }
+
+    fn binance_kline_dir_market(
+        dir: &Path,
+        market: &[&str],
+        period: &str,
+        pair: &str,
+        timeframe: &str,
+    ) -> PathBuf {
+        let mut path = dir.join("binance").join("data");
+        for segment in market {
+            path = path.join(segment);
+        }
+        path.join(period).join("klines").join(pair).join(timeframe)
     }
 
     fn binance_tf_dir(dir: &Path, pair: &str, timeframe: &str) -> PathBuf {
@@ -923,8 +952,6 @@ mod tests {
         name: &str,
         rows: &[(i64, f64, f64, f64, f64, f64)],
     ) {
-        let tf_dir = binance_kline_dir(dir, period, pair, timeframe);
-        std::fs::create_dir_all(&tf_dir).unwrap();
         let mut csv = String::new();
         for r in rows {
             // 读入的 fixture 都是 1h bar：close_time 必须是 open + 1h - 1ms，
@@ -940,6 +967,32 @@ mod tests {
                 r.0 + HOUR_MS - 1
             ));
         }
+        write_test_zip_csv(dir, period, pair, timeframe, name, &csv);
+    }
+
+    /// 直接按原始 CSV 写一个单文件 zip（用来构造损坏行）。
+    fn write_test_zip_csv(
+        dir: &Path,
+        period: &str,
+        pair: &str,
+        timeframe: &str,
+        name: &str,
+        csv: &str,
+    ) {
+        write_test_zip_csv_market(dir, &["futures", "um"], period, pair, timeframe, name, csv);
+    }
+
+    fn write_test_zip_csv_market(
+        dir: &Path,
+        market: &[&str],
+        period: &str,
+        pair: &str,
+        timeframe: &str,
+        name: &str,
+        csv: &str,
+    ) {
+        let tf_dir = binance_kline_dir_market(dir, market, period, pair, timeframe);
+        std::fs::create_dir_all(&tf_dir).unwrap();
         let zip_path = tf_dir.join(name);
         let file = std::fs::File::create(&zip_path).unwrap();
         let mut zip = zip::ZipWriter::new(file);
@@ -1708,11 +1761,60 @@ mod tests {
     }
 
     #[test]
-    fn test_spot_is_not_advertised() {
-        // Spot 变体仍可解析，但本地无数据源 ⇒ 不进 SUPPORTED 列表。
-        assert!(!MarketType::SUPPORTED.contains(&MarketType::Spot));
+    fn test_bad_rows_are_skipped() {
+        let dir = TempDir::new().unwrap();
+        let mut csv = String::new();
+        csv.push_str(&format!(
+            "{BASE_MS},100,105,95,102,10,{},0,0,0,0,0\n",
+            BASE_MS + HOUR_MS - 1
+        ));
+        // close_time 早于 open_time：官方 spot 归档里真实出现过这种行。
+        csv.push_str(&format!(
+            "{},102,107,97,104,20,{BASE_MS},0,0,0,0,0\n",
+            BASE_MS + HOUR_MS
+        ));
+        csv.push_str(&format!(
+            "{},104,109,99,106,30,{},0,0,0,0,0\n",
+            BASE_MS + 2 * HOUR_MS,
+            BASE_MS + 3 * HOUR_MS - 1
+        ));
+        write_test_zip_csv_market(
+            dir.path(),
+            &["spot"],
+            "daily",
+            "BTCUSDT",
+            "1h",
+            "BTCUSDT-1h-2024-01-01.zip",
+            &csv,
+        );
+
+        let loader = DataLoader::new(dir.path());
+        let klines = loader
+            .load_klines_filtered(MarketType::Spot, "BTCUSDT", "1h", None, None, None)
+            .unwrap();
+        assert_eq!(klines.len(), 2);
+    }
+
+    #[test]
+    fn test_spot_is_advertised_first() {
+        // 回测只支持现货归档：把 Spot 置顶，前端默认市场与回测口径一致。
+        assert_eq!(MarketType::SUPPORTED[0], MarketType::Spot);
         assert!(MarketType::SUPPORTED.contains(&MarketType::Futures));
         assert!(MarketType::SUPPORTED.contains(&MarketType::Dukascopy));
+    }
+
+    #[test]
+    fn test_spot_bases_follow_binance_layout() {
+        let dir = TempDir::new().unwrap();
+        let loader = DataLoader::new(dir.path());
+        let bases = loader.bases(MarketType::Spot);
+        assert_eq!(
+            bases,
+            vec![
+                dir.path().join("binance/data/spot/daily/klines"),
+                dir.path().join("binance/data/spot/monthly/klines"),
+            ]
+        );
     }
 
     #[test]

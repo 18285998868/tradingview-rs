@@ -28,7 +28,7 @@ const MAX_SEARCH_LIMIT: usize = 100;
 /// `/udf/history` 查询参数。
 #[derive(Debug, Deserialize)]
 pub(crate) struct HistoryQuery {
-    /// `BINANCE:BTCUSDT` / `DUKASCOPY:EURUSD` / 裸交易对（默认 futures）。
+    /// `BINANCE:BTCUSDT`（合约）/ `BINANCESPOT:BTCUSDT`（现货）/ `DUKASCOPY:EURUSD` / 裸交易对（默认 futures）。
     pub(crate) symbol: String,
     /// UDF 周期：`1`、`5`、`60`、`240`、`1D`…
     pub(crate) resolution: String,
@@ -241,6 +241,7 @@ pub(crate) async fn search_handler(
             "BINANCE" | "BINANCEFUTURES" | "BINANCE_FUTURES" | "BINANCE-FUTURES" | "FUTURES" => {
                 vec![MarketType::Futures]
             }
+            "BINANCESPOT" | "BINANCE_SPOT" | "BINANCE-SPOT" | "SPOT" => vec![MarketType::Spot],
             "DUKASCOPY" | "FX" => vec![MarketType::Dukascopy],
             _ => return (StatusCode::OK, Json(Vec::new())),
         },

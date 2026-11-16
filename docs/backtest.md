@@ -38,7 +38,7 @@ POST /api/backtests
 ```toml
 [backtest]
 enabled = true
-python_bin = "/data/vbt/.venv/bin/python"
+python_bin = "python/.venv/bin/python"  # 相对 CWD；需装 vectorbt 1.2.0
 worker_dir = "python"
 timeout_secs = 1800
 max_concurrent = 2
@@ -148,7 +148,7 @@ cargo test --test backtest_test
 
 # Python 数据读取、引擎、回撤、指标、CLI 与独立参考实现对账
 cd python
-TRADINGVIEW_REAL_DATA=/data/data /data/vbt/.venv/bin/python -m unittest discover -s tests -v
+TRADINGVIEW_REAL_DATA=/data/data .venv/bin/python -m unittest discover -s tests -v
 
 # 前端类型检查与单测
 cd ../frontend

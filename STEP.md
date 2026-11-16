@@ -30,7 +30,7 @@ cargo test -p tradingview-backend
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items
 
 cd python
-TRADINGVIEW_REAL_DATA=/data/data /data/vbt/.venv/bin/python -m unittest discover -s tests -v
+TRADINGVIEW_REAL_DATA=/data/data .venv/bin/python -m unittest discover -s tests -v
 
 cd ../frontend
 npm run build

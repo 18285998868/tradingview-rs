@@ -309,7 +309,10 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=3015)
     parser.add_argument("--pair", default="BTCUSDT")
     parser.add_argument("--timeframe", default="1h")
-    parser.add_argument("--python-bin", default="/data/vbt/.venv/bin/python")
+    parser.add_argument(
+        "--python-bin",
+        default=str(Path(__file__).resolve().parent.parent / "python/.venv/bin/python"),
+    )
     parser.add_argument("--worker-dir", default=str(Path(__file__).resolve().parent.parent / "python"))
     parser.add_argument(
         "--frontend-dir",

@@ -14,7 +14,9 @@ impl ParsedSymbol {
     pub(crate) fn exchange(&self) -> &'static str {
         match self.market {
             MarketType::Dukascopy => "DUKASCOPY",
-            MarketType::Futures | MarketType::Spot => "BINANCE",
+            // 现货与合约的 symbol 会重名（`BTCUSDT`），UDF 里必须用不同交易所前缀区分。
+            MarketType::Spot => "BINANCESPOT",
+            MarketType::Futures => "BINANCE",
         }
     }
 
@@ -36,7 +38,8 @@ impl ParsedSymbol {
     pub(crate) fn description(&self) -> String {
         match self.market {
             MarketType::Dukascopy => format!("{} · Dukascopy", self.pair),
-            MarketType::Futures | MarketType::Spot => format!("{} · Binance Futures", self.pair),
+            MarketType::Spot => format!("{} · Binance Spot", self.pair),
+            MarketType::Futures => format!("{} · Binance Futures", self.pair),
         }
     }
 
@@ -94,6 +97,7 @@ pub(crate) fn parse_symbol(raw: &str) -> Result<ParsedSymbol, SymbolError> {
         "BINANCE" | "BINANCEFUTURES" | "BINANCE_FUTURES" | "BINANCE-FUTURES" | "FUTURES" => {
             MarketType::Futures
         }
+        "BINANCESPOT" | "BINANCE_SPOT" | "BINANCE-SPOT" | "SPOT" => MarketType::Spot,
         "DUKASCOPY" | "FX" => MarketType::Dukascopy,
         other => return Err(SymbolError::UnknownExchange(other.to_string())),
     };
@@ -118,6 +122,16 @@ mod tests {
         // 24/5：UTC 下用 0000-0000，不是 24x5。
         assert_eq!(p.session(), "0000-0000");
         assert_eq!(parse_symbol("BINANCE:BTCUSDT").unwrap().session(), "24x7");
+
+        // 现货与合约的交易对重名，UDF symbol 必须能区分。
+        let spot = parse_symbol("BINANCESPOT:btcusdt").unwrap();
+        assert_eq!(spot.market, MarketType::Spot);
+        assert_eq!(spot.full_name(), "BINANCESPOT:BTCUSDT");
+        assert_eq!(spot.description(), "BTCUSDT · Binance Spot");
+        assert_eq!(
+            parse_symbol("BINANCE:BTCUSDT").unwrap().description(),
+            "BTCUSDT · Binance Futures"
+        );
 
         assert!(parse_symbol("").is_err());
         assert!(parse_symbol("../etc").is_err());

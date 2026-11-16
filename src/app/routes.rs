@@ -819,10 +819,11 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        // 只暴露**本地确有数据源**的类型：spot 无数据，不对外列。
-        assert_eq!(json["data"]["types"][0], "futures");
-        assert_eq!(json["data"]["types"][1], "dukascopy");
-        assert_eq!(json["data"]["types"].as_array().unwrap().len(), 2);
+        // 只暴露**本地确有数据源**的类型；Spot 置顶以便与回测口径一致。
+        assert_eq!(json["data"]["types"][0], "spot");
+        assert_eq!(json["data"]["types"][1], "futures");
+        assert_eq!(json["data"]["types"][2], "dukascopy");
+        assert_eq!(json["data"]["types"].as_array().unwrap().len(), 3);
     }
 
     #[tokio::test]

@@ -682,7 +682,7 @@ cargo test -p tradingview-backend
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items
 
 cd python
-TRADINGVIEW_REAL_DATA=/data/data /data/vbt/.venv/bin/python -m unittest discover -s tests -v
+TRADINGVIEW_REAL_DATA=/data/data .venv/bin/python -m unittest discover -s tests -v
 
 cd ../frontend
 npm run build
@@ -709,7 +709,7 @@ python3 scripts/backtest_sort_check.py \
 
 ```bash
 # AC-D01：12 周期 × 1000 根对 Binance 官方 K 线（需要出口代理）
-/data/vbt/.venv/bin/python scripts/data_official_check.py \
+python/.venv/bin/python scripts/data_official_check.py \
     --start 2024-01-01 --proxy http://127.0.0.1:1081 --out /tmp/d01.json
 
 # AC-D02：12 周期 × 两个月档逐字段对账
@@ -728,7 +728,7 @@ python3 scripts/data_anomaly_check.py \
     --work-dir /tmp/d04 --out /tmp/d04.json
 
 # AC-D05：1m 聚合对原生 1h/1d
-/data/vbt/.venv/bin/python scripts/data_cross_timeframe_check.py \
+python/.venv/bin/python scripts/data_cross_timeframe_check.py \
     --data-dir /data/data --pair BTCUSDT --start 2024-01-01 \
     --end 2025-01-01 --hours 100 --days 10 --out /tmp/d05.json
 
@@ -739,7 +739,7 @@ python3 scripts/data_import_bench.py \
     --proxy http://127.0.0.1:1081 --out /tmp/d06.json
 
 # AC-D07：一年 1m 查询 P95，预热后 100 次
-/data/vbt/.venv/bin/python scripts/data_query_bench.py \
+python/.venv/bin/python scripts/data_query_bench.py \
     --data-dir /data/data --pair BTCUSDT --start 2024-01-01 \
     --end 2025-01-01 --runs 100 --out /tmp/d07.json
 ```

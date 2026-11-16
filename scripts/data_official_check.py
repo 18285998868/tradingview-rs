@@ -6,7 +6,7 @@
 成交量相对误差 ≤ 0.1%。
 
 用法（在仓库根目录、装有 pandas/numpy 的解释器下）：
-    /data/vbt/.venv/bin/python scripts/data_official_check.py \
+    python/.venv/bin/python scripts/data_official_check.py \
         --data-dir /data/data --pair BTCUSDT --start 2024-01-01 \
         --proxy http://127.0.0.1:1081 --out /tmp/d01.json
 

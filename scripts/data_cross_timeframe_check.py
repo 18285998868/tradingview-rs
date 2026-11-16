@@ -11,7 +11,7 @@
 归档在区间内的缺失根数，用于发现下载缺口。
 
 用法（在仓库根目录）：
-    /data/vbt/.venv/bin/python scripts/data_cross_timeframe_check.py \
+    python/.venv/bin/python scripts/data_cross_timeframe_check.py \
         --data-dir /data/data --pair BTCUSDT --start 2024-01-01 \
         --end 2025-01-01 --hours 100 --days 10 --out /tmp/d05.json
 

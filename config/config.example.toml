@@ -9,7 +9,7 @@ frontend_dir = "/data/tradingview-rs/frontend/dist"  # 可选参数, 默认值: 
 
 [backtest]
 enabled = true              # 可选参数, 默认值: true；false 时 /api/backtests* 返回 503
-python_bin = "/data/vbt/.venv/bin/python"  # 必需向量化后端：装有 vectorbt 1.2.0 的解释器
+python_bin = "python/.venv/bin/python"  # 相对 CWD；回测后端：装有 vectorbt 1.2.0 的解释器
 worker_dir = "python"       # 含 backtest_worker/ 的目录；相对路径按 CWD 解析
 # output_dir = "path/to/backtests"  # 可选参数, 默认值: <data_dir>/backtests
 timeout_secs = 1800         # 可选参数, 默认值: 1800；单次 worker 超时（秒）

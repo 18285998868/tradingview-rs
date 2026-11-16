@@ -4,6 +4,12 @@
 
 ### Changed
 
+- `/api/market-types` 现在暴露 `spot` 并置于首位（`spot`、`futures`、`dukascopy`）：本地现货归档早已存在，前端默认市场与回测口径（只吃 spot）从此一致；`futures/cm` 仍未建模。
+- `DataLoader::bases` 改为按市场目录段生成归档根，现货读 `{data_dir}/binance/data/spot/{daily,monthly}/klines`；原先 `Spot` 返回空数组，现与 `futures/um` 同构。
+- 现货 K 线读取使用 `binance_core::BadRowPolicy::Skip` 并记录 warn：官方 spot 1h 2020-12 归档含 `close_time` 早于 `open_time` 的损坏行，原 `Fail` 策略会让整段图表 500；合约读取保持 `Fail`。
+- `/udf/search`、`/udf/symbols`、`/udf/history` 的现货 symbol 前缀为 `BINANCESPOT`（如 `BINANCESPOT:BTCUSDT`），避免与同名的合约 `BINANCE:BTCUSDT` 冲突；裸交易对仍默认 futures。
+- Python 回测环境归位到仓库内 `python/.venv`（uv + Python 3.14），`config/config.example.toml`、README、STEP 与验收脚本不再引用 `/data/vbt/.venv`；`.gitignore` 忽略 `/python/.venv`。
+- 清理共享数据根下的历史残留：`binance-ms`（2.3 G，与 `binance/data` 严格重复）、`binance-smoke`、空的 `.cache`；`futures_um_manual` 因仍被其他研究项目引用而保留。
 - `python/backtest_worker/data.py`：`load_klines` 在读取前按 `[start, end)` 裁剪月/日归档，一年 1m 查询从 130 个文件降到 12 个，P95 2,995 ms → 362 ms；新增 3 项单测覆盖月档、日档与无交集区间。
 - `src/app/udf.rs` 拆为 `src/app/udf/`（`symbol` / `resolution` / `history` / `price` / `protocol` / `handlers`），`/udf/*` 响应形状除下列协议修复外不变。
 - `/udf/history`：`to` 改为右开区间；`countback` 优先于 `from`；空窗口在可回查时返回 `no_data.nextTime`。

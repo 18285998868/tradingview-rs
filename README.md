@@ -36,7 +36,7 @@ data_dir = "path/to/data"   # 必填，无默认，须指向数据根
 # max_body_bytes = 2097152                   # 可选，默认 2 MiB，范围 1 KiB 至 64 MiB
 
 [backtest]                    # 可选；缺省 enabled=true
-python_bin = "/data/vbt/.venv/bin/python"  # 必须是装有 vectorbt 1.2.0 的解释器
+python_bin = "python/.venv/bin/python"  # 相对 CWD；装有 vectorbt 1.2.0 的解释器
 worker_dir = "python"         # 含 backtest_worker/ 的目录
 # enabled = true
 # output_dir = "<data_dir>/backtests"
@@ -126,10 +126,10 @@ frontend/           # 前端工程：src/{api,app,backtest,chart,indicators,main
 ### routes & data_loader
 
 - `GET /api/health` 健康检查；`/api/market-types|pairs|timeframes|klines|quality` 按 `market_type` + `pair` + `timeframe` 取数或统计；`/api/backtests*` 见下节。
-- **`/api/market-types` 只列"本地确有数据源"的类型**：`futures`（binance um）+ `dukascopy`（外汇/贵金属）。`spot` 变体仍可解析，但行情接口不对外暴露（现货 zip 只由回测 worker 直接读取）—— 否则前端会列出与图表数据源不一致的选项。
+- **`/api/market-types` 只列"本地确有数据源"的类型**：`spot`（binance 现货，默认）、`futures`（binance um）、`dukascopy`（外汇/贵金属）；`futures/cm` 尚未建模。默认市场与回测口径一致（回测只吃现货归档）。
 - 入参做目录穿越防护（`..`/`/etc/passwd` 类输入有单测覆盖），并限长（pair ≤ 32、timeframe ≤ 16）。
 - 请求规模防护：`limit` ≤ 10000，超限返回 400。
-- **周期合法性由数据源裁定**：binance 支持 `1m..1mo`，dukascopy 支持 `M1/H1/D1/1m/1h/1d`。输错返回 400（`DataError::InvalidParam`），并回传该源支持的周期列表。
+- **周期合法性由数据源裁定**：binance 支持 `1s..1mo`，dukascopy 支持 `M1/H1/D1/1m/1h/1d`。输错返回 400（`DataError::InvalidParam`），并回传该源支持的周期列表。
 - **发现层按 reader 的归档约定走，不假设单一目录**：binance 取 `daily ∪ monthly`（reader 合并两处，日线优先），否则只有月度归档的下架品种（如 `FTTUSDT`/`LUNAUSDT`）和大周期（`3d`/`1w`/`1mo`）会整体消失；dukascopy 按文件名粒度（`BID_candles_{min_1|hour_1|day_1}.bi5`）**只列真实存在的周期**，避免默认落到没下过的粒度。
 - `DataLoader` 按市场类型定位数据文件，读后进 moka 缓存，统一包 `ApiResponse{success, data, error}`。
 - 状态路由：`/api/layouts`（列表/创建）、`/api/layouts/{id}`（读取/更新/删除）、`/api/drawings?market_type=&pair=`（读取/整组替换）、`/api/preferences`（读取/合并写入）。状态错误按输入 400、内部 500 映射，404 只用于不存在的布局。
@@ -158,7 +158,7 @@ tokio 的 worker 线程只做调度。读 zip（实测 52ms）这类同步重活
 ### 回测（Backtest）
 
 - 范围：Binance 现货、只做多、12 个原生周期；策略为双均线 `dual_ma`，默认 `fast=10, slow=30`。
-- 数据：worker 直接读 `{data_dir}/binance/data/spot/{daily,monthly}/klines`，不经过 `/api/market-types`；`spot` 仍不在行情接口对外暴露。
+- 数据：worker 直接读 `{data_dir}/binance/data/spot/{daily,monthly}/klines`，与图表默认市场 `spot` 读同一份归档。
 - 计算：Rust 写请求 JSON → 子进程 `python -m backtest_worker.cli` → vectorbt 1.2.0 计算 → Rust 读取结果并落库；Python 只读现货 zip，不依赖 `libbinance_core.so`。
 - 接口：`/api/backtests` 提供 config/提交/列表/详情/日志/重试/删除/对比/CSV/命名对比；参数扫描共享 `batch_id`，每组参数一条运行，上限由 `max_grid_runs` 控制。
 - 状态：`queued → running → succeeded|failed`；服务重启把遗留的运行标记失败，重试创建新 ID 并保留历史。
@@ -193,7 +193,7 @@ tokio 的 worker 线程只做调度。读 zip（实测 52ms）这类同步重活
 
 - 独立的 `/udf/*` 命名空间，复用本地 `DataLoader`，不改变 `/api/*` 契约。Charting Library 的 Datafeed URL 填 `http://127.0.0.1:3011/udf` 即可。
 - 端点：`GET /udf/config`、`/udf/time`、`/udf/symbols?symbol=`、`/udf/search?query=&type=&exchange=&limit=`、`/udf/history?symbol=&resolution=&from=&to=&countback=`。
-- symbol：`BINANCE:BTCUSDT`（binance UM futures）或 `DUKASCOPY:EURUSD`；裸交易对默认按 futures 处理。`Spot` 归档只供回测 worker 直接读取，行情与 UDF 接口不暴露。
+- symbol：`BINANCE:BTCUSDT`（UM 合约）、`BINANCESPOT:BTCUSDT`（现货）或 `DUKASCOPY:EURUSD`；裸交易对默认按 futures 处理。
 - resolution：UDF 分钟数映射到本地周期，例如 `1→1m`、`60→1h`、`240→4h`、`1D→1d`、`3D→3d`、`1W→1w`、`1M→1mo`；dukascopy 对应 `1→M1`、`60→H1`、`1D→D1`。`/udf/symbols` 会按该交易对实际存在的周期返回 `supported_resolutions`，有周/月数据时同时给出 `has_weekly_and_monthly` 与 `weekly_multipliers`/`monthly_multipliers`。
 - `/udf/history` 的 `from` 含、`to` **不含**，均为秒级；返回 `{s:"ok",t,o,h,l,c,v}`，其中 `t` 也是秒。`countback` 优先于 `from`（出现即忽略 `from`，从 `to` 往回数）。窗口为空返回 `{s:"no_data"}`，若过去有数据则带 `nextTime`；非法 symbol/resolution 返回 `{s:"error",errmsg}`。
 - `pricescale` 由该交易对最粗周期的最近 200 根 OHLC 小数位推导，静态值只作下限；`minmov` 恒为 1，即 tick = `1/pricescale`。
@@ -285,7 +285,7 @@ cors_origins = []           # 可选，默认 [] = 全放行（仅本地开发�
 # max_body_bytes = 2097152  # 可选，默认 2 MiB，范围 1 KiB 至 64 MiB
 
 [backtest]                  # 可选；缺省 enabled=true
-python_bin = "/data/vbt/.venv/bin/python"  # 必需：装有 vectorbt 1.2.0 的解释器
+python_bin = "python/.venv/bin/python"  # 相对 CWD；必需：装有 vectorbt 1.2.0 的解释器
 worker_dir = "python"       # 含 backtest_worker/ 的目录
 # enabled = true
 # output_dir = "<data_dir>/backtests"
@@ -339,8 +339,10 @@ cargo run -p tradingview-backend                  # 读 config/config.toml，:30
 cd frontend && npm install && npm run dev         # 前端 dev（:5173，/api 代理到 :3001）
 cd frontend && npm run build                       # 产物进 frontend/dist，被后端同服；dist 已入库
 
-# 回测 worker（解释器需装 vectorbt 1.2.0）
-cd python && /data/vbt/.venv/bin/python -m unittest discover -s tests -v
+# Python 回测环境（首次；解释器需装 vectorbt 1.2.0）
+uv venv python/.venv
+uv pip install --python python/.venv/bin/python -r python/pyproject.toml
+cd python && .venv/bin/python -m unittest discover -s tests -v
 ```
 
 回测真实数据冒烟与接口验证见 [`./docs/backtest.md`](./docs/backtest.md)，行情数据

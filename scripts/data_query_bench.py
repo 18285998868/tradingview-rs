@@ -6,7 +6,7 @@
 再预热若干次，最后计时 100 次，取 P95 与 2 秒阈值比较。
 
 用法（在仓库根目录）：
-    /data/vbt/.venv/bin/python scripts/data_query_bench.py \
+    python/.venv/bin/python scripts/data_query_bench.py \
         --data-dir /data/data --pair BTCUSDT --start 2024-01-01 \
         --end 2025-01-01 --runs 100 --out /tmp/d07.json
 

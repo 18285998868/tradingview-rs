@@ -6,5 +6,6 @@
 /reports
 /frontend/node_modules
 /.env
+/python/.venv
 __pycache__/
 *.pyc
