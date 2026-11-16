@@ -62,9 +62,11 @@ POST /api/backtests
 - AC-R05：`keep_equity` 保留策略与级联删除测试；
 - AC-C01–C07：对比 API、警告规则、10 个上限、CSV 与命名保存/找回测试；
 - AC-P01/P02/P03/P04：release 基准、100 组扫描、600 秒并发压测与资源峰值告警；
+- AC-P05：Docker Compose 单命令启动、鉴权、健康检查与状态卷持久化；
 - AC-P06：失败日志与重试接口；
 - AC-P07：在线快照、临时实例、覆盖恢复与抽样比对；
-- AC-V05：26 个指标对接口 JSON 快照的逐点回归。
+- AC-V05：26 个指标对接口 JSON 快照的逐点回归；
+- AC-V07：Firefox 160/159 与 Chromium 157 在 1366×768/1920×1080 的布局检查。
 
 ## 验证结果
 
@@ -82,6 +84,11 @@ POST /api/backtests
   156 毫秒；9,939 根 1m 平移 60.34 fps，区间统计与后端逐项一致；命名对比
   在保存、服务重启、页面找回后仍渲染 2 条曲线；26 个指标 16,800 个数值点与
   `/api/klines` 快照逐点一致。
+- 部署：三阶段镜像 1.31 GB；清空容器与状态卷后单条
+  `docker compose up -d --build --wait` 6.3 秒进入 healthy；2 个真实回测在
+  `restart` 与 `down`/`up` 后详情哈希和 9 张表行数完全一致。
+- 浏览器兼容：Firefox 160/159、Chromium 157 在 1366×768 与 1920×1080 的六组
+  检查全部通过，0 横向溢出；工具栏、图表与 460 px 回测抽屉均在视口内。
 - 安全与运维：`cargo audit --no-fetch` 0 漏洞；23 个非法输入用例全部 4xx；
   默认仅回环，非回环未配 `auth_token` 时启动失败；Bearer/Basic 与可配置请求体
   上限实测生效；快照恢复后 9 张表行数一致、100 条行情与 10 个回测详情一致。
@@ -90,11 +97,8 @@ POST /api/backtests
 权益在开盘 mark；现改为 `from_signals(close, price=open)` 并按收盘重建权益。
 参数扫描改用 fork 进程池（默认最多 4 个），数据读取改为 pandas 向量化。
 
-未覆盖与偏差：Docker Compose 部署、Chrome 与第二个 Firefox 大版本。逐项见
-`../docs/validation.md` 的“未覆盖与偏差”。
-
-† AC-P01/P02/P03/P04、AC-P07、AC-C01、AC-C07 与 AC-V05 已在 2026-11-16 的
-基准机验证；AC-P05 与 AC-V07 仍受环境限制。
+未覆盖与偏差：AC-D01/D02/D06 数据导入项不在本轮；Docker 演练限单机 x86_64，
+浏览器矩阵限桌面视口。逐项见 `../docs/validation.md` 的“未覆盖与偏差”。
 
 ## 失败与重试
 
@@ -107,5 +111,5 @@ POST /api/backtests
 - Python：数据读取（日/月归档覆盖）、回撤、指标、引擎无前视、CLI 端到端；
 - Rust：迁移、运行状态机、参数网格、对比警告、上限、CSV、失败恢复；
 - 前端：`tsc` + 现有 node 测试；
-- 浏览器、性能与安全：已按 `../docs/validation.md` 的四层计划执行，未覆盖项
-  同文列出。
+- 浏览器、性能、部署与安全：已按 `../docs/validation.md` 的四层计划执行；
+  剩余数据导入项与单机/桌面边界同文列出。

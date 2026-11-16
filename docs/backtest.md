@@ -159,6 +159,55 @@ cd frontend && npm test
 真实数据冒烟需要配置 `python_bin` 与 `worker_dir`，然后提交一次单组回测与一次
 参数扫描，检查详情、日志、对比、CSV、重试与删除。
 
+## Docker Compose 部署
+
+仓库根提供多阶段 `Dockerfile`、`docker-compose.yml`、`docker/entrypoint.sh`
+与 `.env.example`。要求 `data-reader` 与 `tradingview-rs` 并排，因为 Cargo
+用 `../data-reader/crates/binance-core` 与 `dukascopy-core` 路径依赖；Compose 通过
+`additional_contexts` 只复制两个 crate，不把 data-reader 的 target 或行情数据带进
+构建上下文。需要 Docker Compose v2.20+ 与 buildx；实测 Docker 29.9.3 +
+Compose 5.7.1 + buildx 0.39.0。
+
+```bash
+cp .env.example .env
+# 写入 TV_AUTH_TOKEN，例如：openssl rand -hex 32
+docker compose up -d --build --wait --wait-timeout 240
+curl http://127.0.0.1:3001/api/health
+```
+
+默认映射宿主机 3001 到容器 3001。容器监听 `0.0.0.0`，因此 `TV_AUTH_TOKEN`
+必填；未设置时入口脚本退出码 64。浏览器首次访问受保护接口会弹 Basic 登录，
+用户名任意、密码为令牌；脚本或客户端用 `Authorization: Bearer <token>`。
+
+`.env` 变量：
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `TV_AUTH_TOKEN` | 无，必填 | 单令牌认证；建议至少 32 字节随机值 |
+| `TV_PORT` | `3001` | 宿主机端口 |
+| `TV_DATA_HOST_DIR` | `/data/data` | 行情根目录，只读挂载到容器 `/data` |
+| `TV_DATA_READER_DIR` | `../data-reader` | 兄弟仓库位置 |
+| `TV_BUILD_NETWORK` | `default` | 构建期代理只监听回环时设为 `host` |
+| `TV_STATE_VOLUME` | `tradingview-rs-state` | 状态卷名 |
+| `TV_IMAGE_TAG` | `local` | 镜像标签 |
+
+运行时布局：
+
+- `/data`：只读绑定行情数据，容器不写原始归档；
+- `/state`：命名卷，保存 `tradingview.db`、`backtests/` 请求/结果/日志与缓存；
+- `/tmp`：256 MiB tmpfs，入口脚本以 `umask 077` 在这里生成权限 600 的
+  `tradingview.toml`（含令牌）；
+- 容器用户 uid/gid 10001，根文件系统只读，`no-new-privileges`；
+- 健康检查每 30 秒请求 `/api/health`，`docker compose ps` 显示 healthy。
+
+状态卷是唯一需要备份的目录。`docker compose down` 保留卷；`docker compose
+down -v` 会删除布局、偏好与全部回测结果。升级镜像用
+`docker compose up -d --build`；只改环境变量时 `docker compose up -d` 即可。
+
+镜像分三段：Node 22 构建前端，Rust 1.100 构建 release 二进制，Python 3.12
+运行时安装 vectorbt 1.2.0 与本地 worker。实测镜像 1.31 GB；完整演练数据见
+[`./validation.md`](./validation.md) 的 AC-P05。
+
 ## 已知限制
 
 - 性能阈值（AC-P01/P02/P03）已在 2026-11-16 的基准机验证；结论限于单机、热页
@@ -171,7 +220,8 @@ cd frontend && npm test
 - 服务默认只监听回环；`auth_token` 启用后 `/api/*` 与 `/udf/*` 需要 Bearer 或
   Basic。未内置 TLS，公网部署需反向代理终止 TLS。
 - 请求体上限由 `max_body_bytes` 配置，默认 2 MiB，合法范围 1 KiB 至 64 MiB。
-- Docker Compose 部署未提供，浏览器兼容只验证了 Firefox 160。
+- Docker Compose 部署见上一节；浏览器兼容覆盖 Firefox 160/159 与 Chromium 157
+  的桌面 1366×768/1920×1080 矩阵，移动端不在范围。
 - 参数扫描使用 fork 进程池；Python 3.14 在多线程进程中 fork 会告警，未来需要
   改 `spawn` 并共享行情表。
 - 首版没有策略插件机制；新增策略需要同时改 Rust 契约、Python worker 与前端表单。

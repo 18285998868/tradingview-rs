@@ -59,6 +59,18 @@ worker_dir = "python"         # 含 backtest_worker/ 的目录
 
 > 早先用 `dotenvy::dotenv()` 会一路往上找 `.env`，仓库根的 `RUST_LOG=debug` 因此无声生效，服务自己的默认过滤规则形同虚设。
 
+## Docker Compose
+
+需要并排的 `data-reader` 仓库、Docker Compose v2.20+ 与 buildx：
+
+```bash
+cp .env.example .env   # 写入 TV_AUTH_TOKEN，例如 openssl rand -hex 32
+docker compose up -d --build --wait
+```
+
+默认映射宿主机 3001，状态保存在命名卷。变量、挂载、构建代理与升级方式见
+[`./docs/backtest.md#docker-compose-部署`](./docs/backtest.md#docker-compose-部署)。
+
 ## 逻辑编排
 
 ```text

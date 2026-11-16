@@ -36,6 +36,8 @@
 
 ### Added
 
+- Docker Compose 部署：根 `Dockerfile` 分三段构建 Node 前端、Rust release 二进制与 Python/vectorbt 运行时；`docker-compose.yml` 通过 `additional_contexts` 引入兄弟 `data-reader` 的两个 core crate，命名卷保存 SQLite 与回测产物，入口脚本从 `TV_AUTH_TOKEN` 生成配置；容器非 root、根文件系统只读、行情只读挂载并带健康检查。
+- `scripts/browser_layout_check.py`：AC-V07 浏览器布局检查，支持 Firefox/Chromium WebDriver、Bearer 注入代理、视口校准、横向溢出/工具栏/图表/回测抽屉断言与截图。
 - `backtest_comparisons` 表（`migrations/003_comparisons.sql`）与 `/api/backtests/comparisons`：命名对比支持列表、保存与删除；名称 1–64 字符且唯一，只接受 2 至 `max_compare_runs` 个已成功运行，运行缺失时列表返回实时 `missing_runs`。
 - 前端对比视图的命名保存/找回/删除：`frontend/src/backtest.ts` 增加名称输入、已保存列表与一键重新对比，重启后可从列表找回。
 - AC-V05 指标快照回归：`frontend/scripts/fixtures/klines-400.json` 为 `/api/klines` 真实响应，`indicator-snapshot.json` 覆盖 26 个指标 16,800 个数值点；`indicator-snapshot.test.mjs` 逐点比对，`generate-indicator-snapshot.mjs` 负责重建。

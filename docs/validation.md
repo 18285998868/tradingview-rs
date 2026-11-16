@@ -10,11 +10,11 @@
 |---|---|---|---|
 | 第一层 正确性 | AC-B01/B02/B03/B06/B07、AC-R01/R02/R04 | 通过 | 35 项 unittest 全绿；逐笔、权益、回撤事件与指标和独立实现一致 |
 | 第二层 性能 | AC-P01/P02/P03/P04 | 通过 | 1m 全量单组中位 13.38 秒；100 组 164.74 秒；5 并发 P95 22.9 毫秒、0 错误；压力回测峰值 RSS 1.587 GiB、磁盘 37.35 GiB |
-| 第三层 浏览器 | AC-C01/V02/V03/V04/V06/C07/V05 | 通过 | 对比 P95 94 毫秒；首屏冷 268 毫秒、热 258 毫秒；同区间切换中位 93 毫秒；9,939 根 60.34 fps；命名对比跨重启找回；26 个指标 16,800 点与接口快照一致 |
-| 第四层 工具链、安全与运维 | AC-S01/S02/P07 | 通过 | 依赖审计 0 漏洞；Bearer/Basic 与可配置上限生效；23 个非法用例 4xx；快照恢复后 9 张表行数一致、10 个回测详情一致 |
+| 第三层 浏览器 | AC-C01/V02/V03/V04/V06/C07/V05/V07 | 通过 | 对比 P95 94 毫秒；首屏冷 268 毫秒、热 258 毫秒；同区间切换中位 93 毫秒；9,939 根 60.34 fps；命名对比跨重启找回；26 个指标 16,800 点与接口快照一致；三浏览器六组合布局检查全过 |
+| 第四层 工具链、安全与运维 | AC-S01/S02/P04/P05/P07 | 通过 | 依赖审计 0 漏洞；Bearer/Basic 与可配置上限生效；23 个非法用例 4xx；Compose 单命令启动 7 秒，重启/重建后 2 个运行与 9 张表一致；快照恢复后 9 张表行数一致、10 个回测详情一致 |
 
-第 3 层只测了 Firefox 160；第 4 层的 Docker Compose 不在本轮。
-逐项状态见“未覆盖与偏差”。
+浏览器兼容覆盖 Firefox 最新两个大版本与 Chromium 当前大版本；Docker Compose
+在第四层补齐。逐项状态见“未覆盖与偏差”。
 
 ## 环境与口径
 
@@ -22,8 +22,12 @@
 - 服务：`cargo build --release`，单进程，验证配置 `max_concurrent=1`、
   `max_grid_runs=100`、`max_curve_points=2000`，SQLite 状态库放在 `/tmp`。
 - Python：3.14.10，vectorbt 1.2.0，pandas/numpy 为其依赖版本。
-- 前端：Firefox 160.0 + geckodriver 0.37.1，窗口 1366×854，`innerWidth/innerHeight`
-  为 1366×768；页面由同一个 release 服务提供。
+- 浏览器：Firefox 160.0（系统包）、Firefox 159.0（Mozilla 官方 linux-x86_64
+  便携包）、Chromium 157.0.8103.78；驱动 geckodriver 0.37.1 与 ChromeDriver
+  157.0.8103.78。性能项仍用 Firefox 160 的 1366×854 窗口（inner
+  1366×768）；兼容矩阵使用精确的 1366×768 与 1920×1080 视口。
+- 容器：Docker 29.9.3 + Compose 5.7.1 + buildx 0.39.0，镜像
+  `tradingview-rs:local` 1.31 GB；容器内 uid 10001，只读根文件系统。
 - 数据：Binance 现货 BTCUSDT，1m 全量 4,852,639 根（2017-08-17 至 2026-11-14，
   130 个归档），1h 原生 54,341 根；AC-V05 另取 U 本位永续 BTCUSDT 1h 400 根。
 - 计时：性能项取 10 次或 5 次的 P95/中位数；浏览器耗时取自页面内的
@@ -165,6 +169,11 @@ compare 每次带 10 个运行 ID。
 
 阈值按规格执行；浏览器项取 10 次 P95，切换项逐个记录。
 
+AC-V07 另用仓库内 `scripts/browser_layout_check.py` 驱动 Firefox 160、Firefox
+159 与 Chromium 157。脚本为本机 Bearer 注入反向代理、精确校准
+`innerWidth/innerHeight`、等待 `tv:first-screen`，检查横向溢出、工具栏/图表/
+canvas 几何与回测抽屉边界，并保存截图。
+
 ### AC-C01 10 个运行对比
 
 - 10 条 1m 长曲线（每条 2,013 点）在热缓存下连续打开 10 次，P95 94 毫秒，
@@ -264,9 +273,32 @@ compare 每次带 10 个运行 ID。
 - 快照由 `node scripts/generate-indicator-snapshot.mjs` 生成；改动指标实现时
   必须显式重建快照并复核差异。
 
-### 浏览器项未覆盖
+### AC-V07 浏览器布局兼容
 
-- AC-V07：只测了 Firefox 160，没有 Chrome，也没有第二个 Firefox 大版本。
+规格要求 Chrome 与 Firefox 最新两个大版本在 1366×768 及以上无阻断性布局错误。
+本轮使用 Firefox 160.0、Firefox 159.0 与 Chromium 157.0.8103.78，对 Docker
+Compose 容器内的同一份前端构建逐组新建会话。
+
+每组检查项：
+
+- `documentElement.scrollWidth` 与 `body.scrollWidth` 不超过视口 1 px；
+- 工具栏、图表容器与 canvas 均在视口内，图表宽度不低于视口 95%、高度不低于
+  55%，canvas 有效尺寸大于 200×150；
+- 市场、交易对、周期、布局、保存、回测与信息等关键控件可见且未横向越界；
+- 打开回测抽屉后，460 px 面板的四条边均在视口内，关闭按钮可见，内容区可滚动。
+
+| 浏览器 | 1366×768 首屏标记 | 1920×1080 首屏标记 | 横向溢出 | 图表尺寸（1366/1920） | 结果 |
+|---|---|---|---|---|---|
+| Firefox 160.0 | 435 毫秒 | 226 毫秒 | 0 px | 1366×687 / 1920×1035 | 通过 |
+| Firefox 159.0 | 228 毫秒 | 244 毫秒 | 0 px | 1366×687 / 1920×1035 | 通过 |
+| Chromium 157.0.8103.78 | 205 毫秒 | 216 毫秒 | 0 px | 1366×687 / 1920×1034 | 通过 |
+
+- 六组全部 `failures = []`，无横向滚动条；1366 宽时工具栏自然换行，1920 宽时
+  单行显示，两种布局的关键控件都可操作。
+- 回测抽屉在 1366 下为 `x=906..1366`，在 1920 下为 `x=1460..1920`，均完整落在
+  视口内；主视图截图在打开抽屉前采集，避免遮挡工具栏。
+- 边界：只覆盖桌面 1366×768 及以上，不含移动端与触摸手势；headless 字体栅格
+  可能与有头模式有细微差异。截图留在基准机 `/tmp/v07/`，未提交到仓库。
 
 ## 第四层 工具链、安全与运维
 
@@ -326,12 +358,56 @@ compare 每次带 10 个运行 ID。
 - 100 条 K 线 JSON 的规范化哈希一致；10 个运行的 ID 顺序与详情哈希一致。
 - 快照之后写入的标记布局在恢复后消失，证明恢复覆盖了旧库；两次启动都通过健康检查。
 
+### AC-P05 Docker Compose 部署
+
+仓库新增根 `Dockerfile`、`docker-compose.yml`、`docker/entrypoint.sh`、
+`.dockerignore` 与 `.env.example`。镜像分三段构建：
+
+- 前端：Node 22，`npm ci` 后执行 `npm run build`；
+- 后端：Rust 1.100 slim，`cargo build --release --locked --bin tradingview`；
+- 运行时：Python 3.12 slim，安装本地 `python/` 包（vectorbt 1.2.0、numpy
+  2.5.5、pandas 3.1.1），复制二进制与前端产物。
+
+Cargo 依赖 `../data-reader/crates/binance-core` 与 `dukascopy-core`。Compose 用
+`additional_contexts` 把兄弟仓库作为只读命名上下文，Dockerfile 只复制
+`Cargo.toml`、`Cargo.lock` 与 `crates/`，不会发送 data-reader 的 1.6 GB target，
+也不会把 35 GiB 行情带进构建上下文。
+
+运行时安全与状态：
+
+- 容器用户 uid/gid 10001；根文件系统只读；`/tmp` 为 256 MiB tmpfs；
+- 行情 `/data/data` 只读绑定到 `/data`；
+- SQLite、回测请求/结果/日志放在命名卷 `tradingview-rs-state` 的 `/state`；
+- 入口脚本从环境变量生成 `/tmp/tradingview.toml`，固定 `host = "0.0.0.0"`，
+  `TV_AUTH_TOKEN` 缺失时退出码 64；服务端再校验非空与空白字符；脚本先
+  `umask 077`，配置文件实测权限 600，同容器其他进程读不到令牌；
+- 健康检查每 30 秒请求 `/api/health`，`no-new-privileges` 开启。
+
+演练步骤与结果：
+
+- 清空容器与卷后执行一条
+  `docker compose up -d --build --wait --wait-timeout 240`，6.3 秒后容器 healthy，
+  端口映射 `3101→3001`（避开基准机已有的 3001 debug 实例）。
+- 无令牌 `GET /api/backtests` 返回 401，Bearer 令牌返回 200；
+  `/api/health` 免认证返回 200。
+- 提交 2 个真实 BTCUSDT 1h 回测（2024-01-01 至 2024-03-01，fast/slow 为
+  10/30 与 20/60），均 `succeeded`：各 1,440 根，33 笔与 14 笔交易，总收益
+  4.6474% 与 31.0488%。
+- 9 张表行数：`backtest_runs` 2、`backtest_trades` 47、`backtest_equity`/
+  `backtest_underwater` 各 2,880、`backtest_drawdown_events` 38，其余 0。
+- `docker compose restart` 后，两个运行详情规范化哈希与 9 张表行数完全一致；
+  再 `down` + `up` 重建容器与网络后仍一致。
+- 容器内复核：uid 10001，vectorbt 1.2.0 / numpy 2.5.5 / pandas 3.1.1；配置为
+  `host=0.0.0.0`、`db_path=/state/tradingview.db`、worker `/app/python`。
+
+边界：演练在同一台基准机上完成，不是独立物理机；基础镜像已预先拉取；构建期
+需要访问 npm、crates.io 与 PyPI。代理只监听回环时需把 `TV_BUILD_NETWORK` 设为
+`host`。这些限制不影响“空状态卷 + 单条 Compose 命令启动并持久化”的结论。
+
 ## 未覆盖与偏差
 
 | 项 | 状态 | 说明 |
 |---|---|---|
-| AC-P05 Docker Compose | 缺口 | 远程机器没有 docker/podman，安装需要 sudo 密码；仓库仍缺 Compose 文件 |
-| AC-V07 浏览器兼容 | 部分 | 仅 Firefox 160，无 Chrome，也没有第二个 Firefox 大版本 |
 | AC-D01/D02/D06 | 不在本轮 | 数据导入正确性与全量导入性能 |
 
 其他风险：
@@ -340,6 +416,8 @@ compare 每次带 10 个运行 ID。
   fork 进程池当前可用，但未来 Python 移除 fork 或禁用该组合时需要改 `spawn`，
   届时行情表需要改为共享内存或重新读取。
 - 浏览器与性能结果来自单机、热页缓存；没有做冷盘、低内存、限核等降级场景。
+- Docker 演练限于单机 x86_64；未做跨主机、跨架构与离线镜像导入。V07 只覆盖
+  桌面 1366×768 及以上，不含移动端与触摸手势。
 - AC-V03 的“同区间”依赖数据覆盖：若目标周期在该时间窗内没有归档，只能收敛到
   已有数据边界。本轮 12 个规格周期在 2023-06-24 至 07-01 都有数据；3d/1w/1mo
   的窗口小于一根 bar，保持区间没有意义。
@@ -362,9 +440,17 @@ npm run build
 npm test
 ```
 
-资源告警与快照恢复可直接用仓库脚本复跑：
+Docker 部署与资源告警、快照恢复可直接复跑：
 
 ```bash
+# AC-P05：需要并排的 ../data-reader；先写入 TV_AUTH_TOKEN
+cp .env.example .env
+docker compose up -d --build --wait --wait-timeout 240
+docker compose ps
+
+# 后续 curl / 浏览器脚本从 .env 读取令牌
+set -a; . ./.env; set +a
+
 # AC-P04：采样服务进程树与磁盘，超限退出码 2
 python3 scripts/resource_watch.py --pid <服务 PID> \
     --path /data/data --path <状态库> --path <回测输出目录>
@@ -372,10 +458,17 @@ python3 scripts/resource_watch.py --pid <服务 PID> \
 # AC-P07：在线快照 → 临时实例 → 覆盖恢复 → 复核
 python3 scripts/snapshot_restore_check.py \
     --source-db <状态库> --work-dir /tmp/p07 --data-dir /data/data
+
+# AC-V07：单组布局检查；其余组合换浏览器、二进制、驱动与视口
+python3 scripts/browser_layout_check.py \
+    --browser firefox --binary /usr/bin/firefox \
+    --driver <geckodriver> --url http://127.0.0.1:3001 \
+    --auth-token "$TV_AUTH_TOKEN" --width 1366 --height 768 \
+    --label firefox-160-1366x768 --screenshot /tmp/v07/firefox-160-1366x768.png
 ```
 
-性能与浏览器测量使用一次性脚本驱动（浏览器为 headless Firefox + geckodriver，
-窗口 1366×854）；接口、参数与计时口径见上文，API 说明见 `./backtest.md`。
+性能与浏览器计时口径见上文，API 与 Compose 变量说明见 `./backtest.md`。
+复跑 V07 需要 Firefox 160/159、Chromium 157 与匹配的 geckodriver/ChromeDriver。
 复跑性能项时需确认：
 
 - 用 release 构建，Python 解释器装有 vectorbt 1.2.0；
