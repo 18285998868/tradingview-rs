@@ -68,6 +68,53 @@ class DataTest(unittest.TestCase):
         self.assertEqual(loaded.rows, 1)
         self.assertEqual(loaded.first_ms, ms(2024, 1, 2))
 
+    def test_range_only_reads_overlapping_monthly_archives(self) -> None:
+        write_zip(
+            self.monthly,
+            "BTCUSDT-1h-2024-01.zip",
+            [(ms(2024, 1, 1), 100.0), (ms(2024, 1, 2), 101.0)],
+        )
+        write_zip(
+            self.monthly,
+            "BTCUSDT-1h-2024-02.zip",
+            [(ms(2024, 2, 1), 200.0), (ms(2024, 2, 2), 201.0)],
+        )
+        loaded = load_klines(
+            self.root,
+            "BTCUSDT",
+            "1h",
+            start_ms=ms(2024, 2, 1),
+            end_ms=ms(2024, 3, 1),
+        )
+        self.assertEqual(loaded.rows, 2)
+        self.assertEqual(loaded.files, 1)
+        self.assertEqual(loaded.first_ms, ms(2024, 2, 1))
+
+    def test_range_only_reads_overlapping_daily_archives(self) -> None:
+        write_zip(self.daily, "BTCUSDT-1h-2024-01-02.zip", [(ms(2024, 1, 2), 100.0)])
+        write_zip(self.daily, "BTCUSDT-1h-2024-02-02.zip", [(ms(2024, 2, 2), 200.0)])
+        loaded = load_klines(
+            self.root,
+            "BTCUSDT",
+            "1h",
+            start_ms=ms(2024, 2, 1),
+            end_ms=ms(2024, 3, 1),
+        )
+        self.assertEqual(loaded.rows, 1)
+        self.assertEqual(loaded.files, 1)
+        self.assertEqual(loaded.first_ms, ms(2024, 2, 2))
+
+    def test_range_without_overlapping_archives_raises(self) -> None:
+        write_zip(self.monthly, "BTCUSDT-1h-2024-01.zip", [(ms(2024, 1, 1), 100.0)])
+        with self.assertRaises(DataError):
+            load_klines(
+                self.root,
+                "BTCUSDT",
+                "1h",
+                start_ms=ms(2024, 2, 1),
+                end_ms=ms(2024, 3, 1),
+            )
+
     def test_microsecond_timestamps_are_normalized(self) -> None:
         # Binance 现货归档从 2025-01-01 起使用微秒。
         write_zip(

@@ -149,6 +149,38 @@ def _read_archive(
     return stamps, values
 
 
+def _period_bounds(day: date, monthly: bool) -> tuple[int, int]:
+    """归档覆盖的 UTC 区间 `[start, end)`；月档按自然月，日档按天。"""
+
+    start = _day_key(day) * _MS_PER_DAY
+    if monthly:
+        year = day.year + (day.month == 12)
+        month = day.month % 12 + 1
+        end = _day_key(date(year, month, 1)) * _MS_PER_DAY
+    else:
+        end = start + _MS_PER_DAY
+    return start, end
+
+
+def _select_window(
+    files: list[tuple[date, Path]],
+    monthly: bool,
+    start_ms: int | None,
+    end_ms: int | None,
+) -> list[tuple[date, Path]]:
+    """只保留与请求区间相交的归档，避免整库扫描后再逐行过滤。"""
+
+    def overlaps(day: date) -> bool:
+        start, end = _period_bounds(day, monthly)
+        if start_ms is not None and end <= start_ms:
+            return False
+        if end_ms is not None and start >= end_ms:
+            return False
+        return True
+
+    return [(day, path) for day, path in files if overlaps(day)]
+
+
 def load_klines(
     data_dir: str | Path,
     pair: str,
@@ -162,12 +194,16 @@ def load_klines(
         raise DataError("start_ms must be < end_ms")
 
     monthly_dir, daily_dir = archive_dirs(data_dir, pair, interval)
-    monthly = _zip_files(monthly_dir, _MONTHLY_RE)
-    daily = _zip_files(daily_dir, _DAILY_RE)
-    if not monthly and not daily:
+    monthly_all = _zip_files(monthly_dir, _MONTHLY_RE)
+    daily_all = _zip_files(daily_dir, _DAILY_RE)
+    if not monthly_all and not daily_all:
         raise DataError(
             f"no Binance spot archives for {pair} {interval} under {monthly_dir.parent.parent.parent}"
         )
+    monthly = _select_window(monthly_all, True, start_ms, end_ms)
+    daily = _select_window(daily_all, False, start_ms, end_ms)
+    if not monthly and not daily:
+        raise DataError(f"no archives overlap the requested range for {pair} {interval}")
 
     daily_days = [_day_key(day) for day, _ in daily]
     chunks: list[tuple[np.ndarray, np.ndarray]] = []
