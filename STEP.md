@@ -59,6 +59,7 @@ npm test
 - 阶段二 前端增量（A4）：`./STEP.d/06-frontend-incremental.md`
 - 阶段三 数据质量报告：`./STEP.d/07-quality-report.md`
 - 阶段四 回测/回撤/对比：`./STEP.d/08-backtest.md`
+- 行情数据口径与数据层验收：`./docs/data.md`
 - 四层验证报告：`./docs/validation.md`
 - 架构裁决：`./docs/adr/0001-rust-python-vectorbt.md`
 - 变更记录：`./CHANGELOG.md`
