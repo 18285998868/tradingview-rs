@@ -331,7 +331,9 @@ export class BacktestPanel {
   syncContext(): void {
     const context = this.host.currentContext();
     this.contextEl.textContent = context
-      ? `${context.marketType.toUpperCase()} · ${context.pair} · ${context.timeframe}`
+      ? `${context.marketType.toUpperCase()} · ${context.pair} · ${context.timeframe}${
+          context.marketType === 'spot' ? '' : ' · 回测仅支持 spot'
+        }`
       : '选择交易对和周期后提交回测';
   }
 
@@ -363,6 +365,10 @@ export class BacktestPanel {
     const context = this.host.currentContext();
     if (!context) {
       this.statusEl.textContent = '请先加载 K 线数据';
+      return;
+    }
+    if (context.marketType !== 'spot') {
+      this.statusEl.textContent = '回测只支持 Binance 现货，请先把市场切换到 spot';
       return;
     }
     const fast = Math.trunc(readNumber(this.fastInput, 10));
