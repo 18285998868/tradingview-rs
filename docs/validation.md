@@ -8,7 +8,7 @@
 
 | 层 | 验收项 | 结果 | 关键数据 |
 |---|---|---|---|
-| 第零层 数据 | AC-D01/D02/D06 | 通过 | 3 标的 × 12 周期 × 1000 根 OHLC 零差异；149,048 行逐字段零差异；100 标的 × 12 周期全量导入 14.4 分钟、10.82 GB、0 失败 |
+| 第零层 数据 | AC-D01/D02/D03/D04/D05/D06/D07 | 通过 | 3 标的 × 12 周期 × 1000 根 OHLC 零差异；149,048 行逐字段零差异；重复导入零重写；异常注入计数与样例齐全；110 个跨周期窗口 OHLC 零差异；100 标的 × 12 周期全量导入 14.4 分钟、10.82 GB、0 失败；一年 1m 查询 P95 362 毫秒 |
 | 第一层 正确性 | AC-B01/B02/B03/B06/B07、AC-R01/R02/R04 | 通过 | 35 项 unittest 全绿；逐笔、权益、回撤事件与指标和独立实现一致 |
 | 第二层 性能 | AC-P01/P02/P03/P04 | 通过 | 1m 全量单组中位 13.38 秒；100 组 164.74 秒；5 并发 P95 22.9 毫秒、0 错误；压力回测峰值 RSS 1.587 GiB、磁盘 37.35 GiB |
 | 第三层 浏览器 | AC-C01/V02/V03/V04/V06/C07/V05/V07 | 通过 | 对比 P95 94 毫秒；首屏冷 268 毫秒、热 258 毫秒；同区间切换中位 93 毫秒；9,939 根 60.34 fps；命名对比跨重启找回；26 个指标 16,800 点与接口快照一致；三浏览器六组合布局检查全过 |
@@ -31,10 +31,12 @@
   `tradingview-rs:local` 1.31 GB；容器内 uid 10001，只读根文件系统。
 - 数据：Binance 现货 BTCUSDT，1m 全量 4,852,639 根（2017-08-17 至 2026-11-14，
   130 个归档），1h 原生 54,341 根；AC-V05 另取 U 本位永续 BTCUSDT 1h 400 根。
-- 数据层：AC-D01/D02 用 BTCUSDT 月档；AC-D06 按 24 小时成交额取前 100 个
-  USDT 现货标的，下载 12 周期月档到空目录。下载器并发 64，`data.binance.vision`
-  直连，起始日解析所需的 `api.binance.com` 走本机 HTTP 代理。读取器
-  `binance-core 0.2.0`（data-reader `a844ea0`），下载器 data-downloader `f852202`。
+- 数据层：AC-D01/D02/D05/D07 用 BTCUSDT 月档；AC-D03 用 BTCUSDT/ETHUSDT
+  2024-01 至 2024-03 的 12 个归档；AC-D04 用脚本生成的异常归档；AC-D06 按
+  24 小时成交额取前 100 个 USDT 现货标的，下载 12 周期月档到空目录。下载器
+  并发 64，`data.binance.vision` 直连，起始日解析所需的 `api.binance.com`
+  走本机 HTTP 代理。读取器 `binance-core 0.2.0`（data-reader `a844ea0`），
+  下载器 data-downloader `f852202`。
 - 计时：性能项取 10 次或 5 次的 P95/中位数；浏览器耗时取自页面内的
   `performance.mark/measure`，在 `setData`、应用首屏视窗并等两帧后记录。
 - 缓存：性能与浏览器测试都在同一台机器上连续运行，操作系统的页缓存是热的；
@@ -44,7 +46,7 @@
 
 ### 方法
 
-三个脚本只读归档，结果写 JSON，失败退出码 1；字段映射、时间口径与质量标记见
+七个脚本只读归档，结果写 JSON，失败退出码 1；字段映射、时间口径与质量标记见
 [`./data.md`](./data.md)。
 
 - AC-D01：12 个周期各取 1000 根固定窗口，起点 2024-01-01 UTC。本地走回测
@@ -55,11 +57,25 @@
   内 CSV 原文逐行逐字段比较 12 列，另校验周期对齐、首行等于 UTC 月首与
   `close_time = open_time + 周期 - 1`。2025-01 现货归档是微秒时间戳，用于
   验证归一逻辑。
+- AC-D03：在空目录用同一个配置连续下载两次（BTCUSDT/ETHUSDT × 1h/1d ×
+  2024-01 至 2024-03），比对 zip 集合、字节数、sha256 与修改时间；再用
+  `binance-core` 读取同一区间，核对两次行数一致，并检查 `last-run.json` 的
+  `finished_at` 是否更新。
+- AC-D04：脚本生成一个月度 1h 归档，注入 2 根缺失 bar、1 行 `high < low`、
+  1 行负成交量和 1 行重复时间戳；`bad_rows="skip"` 核对 `rows_skipped`、
+  `gaps`、`skipped_samples` 与派生缺失根数，`bad_rows="fail"` 与重复时间戳
+  核对应以非零退出并带可读错误。
+- AC-D05：BTCUSDT 2024 年 1m 全量，均匀抽 100 根 1h 与 10 根 1d；每根 1h
+  必须覆盖 60 根 1m、1d 覆盖 1,440 根，比较聚合 OHLC 与成交量；同时统计
+  1m/1h/1d 归档在区间内的缺失根数。
 - AC-D06：按 24 小时成交额取前 100 个 USDT 现货标的（排除杠杆代币与稳定币对），
   下载 12 个周期月档到空目录；起始日由下载器按各标的归档首日解析，默认
   sha256 校验，`data.binance.vision` 直连、`api.binance.com` 走本机代理，
   并发 64。计时包含起始日解析与全部下载，存储为全部 zip 字节（校验后不保留
   sidecar）。
+- AC-D07：按标的与 `[start, end)` 读取一年 1m，先记录一次冷启动，再预热后
+  计时 100 次取 P95；查询路径复用回测 worker 的 `load_klines`，归档在文件
+  选择阶段按区间裁剪。
 
 ### AC-D01 官方 K 线对账
 
@@ -78,6 +94,50 @@
 - 2025-01 的微秒归一覆盖 12 个周期；每行 `close_time` 与 `open_time + 周期 - 1`
   完全匹配，首行都等于对应 UTC 月首。
 - 抽样要求 1000 行，实际做了整月全量比对，样本是其超集。
+
+### AC-D03 重复导入
+
+在空目录连续执行两次下载，固定配置为 2 标的 × 2 周期 × 3 个月：
+
+| 指标 | 第一次 | 第二次 |
+|---|---|---|
+| 退出码 | 0 | 0 |
+| 文件数 | 12 | 12 |
+| 字节数 | 263,024 | 263,024 |
+| 新增 / 删除 / 重写 | - | 0 / 0 / 0 |
+| sha256 变化 | - | 0 |
+| BTC/ETH 1h 行数 | 2,184 / 2,184 | 2,184 / 2,184 |
+| BTC/ETH 1d 行数 | 91 / 91 | 91 / 91 |
+| `last-run.json` 的 `finished_at` | 13:34:02Z | 13:34:34Z |
+
+第二次运行耗时 32.2 秒，主要花在远端清单核对，totals 为 0，未重写任何文件。
+`last-run.json` 每次结束都原子更新，更新时间可查。
+
+### AC-D04 异常注入
+
+| 注入异常 | 数量 | 观测 |
+|---|---|---|
+| 缺失 bar | 2 | `gaps=1`，按首尾推算缺失 2 根 |
+| `high < low` | 1 | `rows_skipped` 计入并保留样例 |
+| 负成交量 | 1 | `rows_skipped` 计入并保留样例 |
+| 重复 `open_time` | 1 | `skip` 也以非零退出，错误含 `duplicate or misordered` |
+
+`bad_rows="skip"` 时读取结果为 8 行（10 根正常 bar 去掉 2 根），
+`rows_skipped=2`、`skipped_samples` 两条分别指出 `invalid OHLC` 与
+`negative value`；`bad_rows="fail"` 时首行坏数据即退出 1，错误带文件名与
+CSV 行号。重复时间戳在合并阶段被拒绝，不静默去重。
+
+### AC-D05 跨周期一致性
+
+BTCUSDT 2024 年 1m 归档共 527,040 行，按首尾推算缺失 0 根。
+
+| 对比 | 抽样 | 每窗 1m 根数 | OHLC 差异 | 成交量最大相对误差 |
+|---|---|---|---|---|
+| 1h | 100 | 60 | 0 | 3.64e-16 |
+| 1d | 10 | 1,440 | 0 | 1.34e-16 |
+
+110 个抽样窗口全部覆盖完整，聚合 OHLC 与原生逐值相等，成交量误差远低于
+0.1% 阈值。
 
 ### AC-D06 全量导入
 
@@ -99,13 +159,36 @@ BTC 单标的体积上界估算为 133,200 个文件、约 34 GB、约 39 分钟
 AC-D06 的 † 阈值按上界加余量冻结：全量导入 ≤ 60 分钟、存储 ≤ 50 GB。换网络、
 并发或加入日档/其他数据集需要重测。
 
+### AC-D07 一年 1m 查询
+
+BTCUSDT 2024-01-01 至 2025-01-01，共 527,040 根 1m，读取 12 个月档：
+
+| 指标 | 实测 |
+|---|---|
+| 冷启动 | 357 ms |
+| P50 | 322 ms |
+| P95 | 362 ms |
+| P99 | 407 ms |
+| 最大 | 436 ms |
+| 阈值 | 2,000 ms |
+
+首次实现会读取 2017 年以来的全部 130 个归档后再按时间过滤，P95 为 2,995 ms。
+现在 `load_klines` 在扫描文件时先按 `[start, end)` 裁剪归档，一年查询只读
+12 个月档；新增 3 项单测覆盖月档、日档与无交集区间。计时在页缓存热的同一台
+机器上取得，清页缓存后的冷读会更高。
+
 ### 边界
 
 - AC-D01 只覆盖三个主流标的与 2024-01-01 起窗口；官方 REST 与归档同源，
   能发现本地解析与归一引入的差异，不能发现上游系统性口径错误。
 - AC-D02 抽查两个月档而非全库扫描；覆盖全部 12 列字段。
+- AC-D03 只覆盖 12 个文件的小数据集，未覆盖日档、断点续传与并发写入。
+- AC-D04 是脚本生成的合成异常，不代表生产归档的真实损坏分布。
+- AC-D05 只覆盖 BTCUSDT 2024 年，未覆盖其他标的与更长区间。
 - AC-D06 不含日档与 `aggTrades`/`trades` 等数据集；“9 年”是 BTC/ETH 的完整
   历史，新标的不足 9 年；耗时为单机单次结果，归档域名直连。
+- AC-D07 的路径是回测 worker 的 `load_klines`，不是 HTTP 查询接口；计时在
+  页缓存热的同一台机器上取得。
 - 100 标的按 2026-11-16 的 24 小时成交额快照选取，标的池随市场变化，重跑会
   得到不同的名单。
 
@@ -480,9 +563,7 @@ Cargo 依赖 `../data-reader/crates/binance-core` 与 `dukascopy-core`。Compose
 
 ## 未覆盖与偏差
 
-| 项 | 状态 | 说明 |
-|---|---|---|
-| AC-D03/D04/D05/D07 | 不在本报告 | 归档下载重复导入、异常注入、跨周期一致性与查询 P95，属于数据仓库与下载器侧；本报告只覆盖 D01/D02/D06 |
+数据层 AC-D01 至 AC-D07 均已在本报告第零层覆盖；其余偏差与风险如下。
 
 其他风险：
 
@@ -525,11 +606,32 @@ npm test
 python3 scripts/source_field_check.py \
     --reader /data/data-reader/target/release/binance-core --out /tmp/d02.json
 
+# AC-D03：空目录连续导入两次，核对幂等性
+python3 scripts/data_reimport_check.py \
+    --downloader /data/data-downloader/target/release/binance-data-downloader \
+    --reader /data/data-reader/target/release/binance-core \
+    --work-dir /tmp/d03 --clean --out /tmp/d03.json
+
+# AC-D04：注入异常并核对计数、样例与失败信息
+python3 scripts/data_anomaly_check.py \
+    --reader /data/data-reader/target/release/binance-core \
+    --work-dir /tmp/d04 --out /tmp/d04.json
+
+# AC-D05：1m 聚合对原生 1h/1d
+/data/vbt/.venv/bin/python scripts/data_cross_timeframe_check.py \
+    --data-dir /data/data --pair BTCUSDT --start 2024-01-01 \
+    --end 2025-01-01 --hours 100 --days 10 --out /tmp/d05.json
+
 # AC-D06：前 100 标的 × 12 周期全量导入；空目录才是冷启动
 python3 scripts/data_import_bench.py \
     --downloader /data/data-downloader/target/release/binance-data-downloader \
     --output-dir /data/d06-bench --symbols 100 --concurrency 64 \
     --proxy http://127.0.0.1:1081 --out /tmp/d06.json
+
+# AC-D07：一年 1m 查询 P95，预热后 100 次
+/data/vbt/.venv/bin/python scripts/data_query_bench.py \
+    --data-dir /data/data --pair BTCUSDT --start 2024-01-01 \
+    --end 2025-01-01 --runs 100 --out /tmp/d07.json
 ```
 
 Docker 部署与资源告警、快照恢复可直接复跑：

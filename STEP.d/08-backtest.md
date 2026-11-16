@@ -97,8 +97,8 @@ POST /api/backtests
 权益在开盘 mark；现改为 `from_signals(close, price=open)` 并按收盘重建权益。
 参数扫描改用 fork 进程池（默认最多 4 个），数据读取改为 pandas 向量化。
 
-未覆盖与偏差：AC-D01/D02/D06 数据导入项不在本轮；Docker 演练限单机 x86_64，
-浏览器矩阵限桌面视口。逐项见 `../docs/validation.md` 的“未覆盖与偏差”。
+未覆盖与偏差：数据层 AC-D01 至 AC-D07 已在第零层覆盖；Docker 演练限单机
+x86_64，浏览器矩阵限桌面视口。逐项见 `../docs/validation.md` 的“未覆盖与偏差”。
 
 ## 失败与重试
 

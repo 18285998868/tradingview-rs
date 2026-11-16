@@ -4,6 +4,7 @@
 
 ### Changed
 
+- `python/backtest_worker/data.py`：`load_klines` 在读取前按 `[start, end)` 裁剪月/日归档，一年 1m 查询从 130 个文件降到 12 个，P95 2,995 ms → 362 ms；新增 3 项单测覆盖月档、日档与无交集区间。
 - `src/app/udf.rs` 拆为 `src/app/udf/`（`symbol` / `resolution` / `history` / `price` / `protocol` / `handlers`），`/udf/*` 响应形状除下列协议修复外不变。
 - `/udf/history`：`to` 改为右开区间；`countback` 优先于 `from`；空窗口在可回查时返回 `no_data.nextTime`。
 - `/udf/symbols`：`pricescale` 由最粗周期的样本价格小数位推导（静态值作下限）；`has_intraday` 只统计日内周期；新增 `1W`/`1M`/`3D` 与 `weekly_multipliers`/`monthly_multipliers`；dukascopy `session` 改为 `0000-0000`。
@@ -36,7 +37,7 @@
 
 ### Added
 
-- 数据层验收：`docs/data.md` 记录归档布局、12 字段映射、UTC 毫秒与 2025 年起微秒归一、质量标记口径；新增 `scripts/data_official_check.py`（AC-D01 官方 K 线对账）、`scripts/source_field_check.py`（AC-D02 源文件逐字段对账）与 `scripts/data_import_bench.py`（AC-D06 前 100 标的 12 周期月档导入计时与测盘）。
+- 数据层验收：`docs/data.md` 记录归档布局、12 字段映射、UTC 毫秒与 2025 年起微秒归一、质量标记口径；新增七个可复跑脚本，覆盖 AC-D01 官方 K 线对账、AC-D02 源文件逐字段对账、AC-D03 重复导入幂等性、AC-D04 异常注入、AC-D05 跨周期一致性、AC-D06 前 100 标的 12 周期月档导入计时与 AC-D07 一年 1m 查询 P95。
 - Docker Compose 部署：根 `Dockerfile` 分三段构建 Node 前端、Rust release 二进制与 Python/vectorbt 运行时；`docker-compose.yml` 通过 `additional_contexts` 引入兄弟 `data-reader` 的两个 core crate，命名卷保存 SQLite 与回测产物，入口脚本从 `TV_AUTH_TOKEN` 生成配置；容器非 root、根文件系统只读、行情只读挂载并带健康检查。
 - `scripts/browser_layout_check.py`：AC-V07 浏览器布局检查，支持 Firefox/Chromium WebDriver、Bearer 注入代理、视口校准、横向溢出/工具栏/图表/回测抽屉断言与截图。
 - `backtest_comparisons` 表（`migrations/003_comparisons.sql`）与 `/api/backtests/comparisons`：命名对比支持列表、保存与删除；名称 1–64 字符且唯一，只接受 2 至 `max_compare_runs` 个已成功运行，运行缺失时列表返回实时 `missing_runs`。
