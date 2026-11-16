@@ -10,6 +10,9 @@ services:
         data-reader: ${TV_DATA_READER_DIR:-../data-reader}
       # 构建阶段需要访问 npm/crates.io；代理只监听回环时设为 host。
       network: ${TV_BUILD_NETWORK:-default}
+      args:
+        # 官方 PyPI 慢时用 TV_PIP_INDEX_URL 指向镜像站。
+        PIP_INDEX_URL: ${TV_PIP_INDEX_URL:-https://pypi.org/simple}
     image: tradingview-rs:${TV_IMAGE_TAG:-local}
     container_name: tradingview-rs
     restart: unless-stopped

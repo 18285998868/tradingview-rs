@@ -202,6 +202,7 @@ curl http://127.0.0.1:3001/api/health
 | `TV_DATA_HOST_DIR` | `/data/data` | 行情根目录，只读挂载到容器 `/data` |
 | `TV_DATA_READER_DIR` | `../data-reader` | 兄弟仓库位置 |
 | `TV_BUILD_NETWORK` | `default` | 构建期代理只监听回环时设为 `host` |
+| `TV_PIP_INDEX_URL` | `https://pypi.org/simple` | 构建期 pip 索引源，出国慢可换镜像站 |
 | `TV_STATE_VOLUME` | `tradingview-rs-state` | 状态卷名 |
 | `TV_IMAGE_TAG` | `local` | 镜像标签 |
 

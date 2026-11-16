@@ -34,8 +34,10 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # 先装依赖，再复制入口脚本和构建产物，保证源码改动不重复安装 vectorbt。
+# 索引源可切换：官方 PyPI 慢时用 TV_PIP_INDEX_URL 指向镜像站。
+ARG PIP_INDEX_URL=https://pypi.org/simple
 COPY python /app/python
-RUN pip install --no-cache-dir /app/python
+RUN pip install --no-cache-dir --index-url "$PIP_INDEX_URL" /app/python
 
 RUN groupadd --gid 10001 tradingview \
     && useradd --uid 10001 --gid tradingview --home-dir /state --shell /usr/sbin/nologin tradingview \
