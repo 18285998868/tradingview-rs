@@ -32,6 +32,8 @@ data_dir = "path/to/data"   # 必填，无默认，须指向数据根
 # db_path = "path/to/data/tradingview.db"  # 可选，默认 <data_dir>/tradingview.db
 # frontend_dir = "<workspace>/frontend/dist"  # 可选，默认 CARGO_MANIFEST_DIR/frontend/dist
 # cors_origins = ["http://localhost:5173"]   # 可选，默认 [] = 全放行（仅本地开发）
+# auth_token = "change-me"                   # 可选；启用 Bearer/Basic 认证，非回环 host 必填
+# max_body_bytes = 2097152                   # 可选，默认 2 MiB，范围 1 KiB 至 64 MiB
 
 [backtest]                    # 可选；缺省 enabled=true
 python_bin = "/data/vbt/.venv/bin/python"  # 必须是装有 vectorbt 1.2.0 的解释器
@@ -79,17 +81,18 @@ v
 src/main.rs         # 入口：dotenv(CWD) → tracing → Config::load() → run(&config)；anyhow 收敛
 src/lib.rs          # 只做导出 + crate 级 lint + README 内联文档
 src/app/mod.rs      # 执行代码：run(config) 编排（data_dir/状态库/AppState/路由+CORS/静态/serve）+ 优雅停机
-src/app/routes.rs   # 执行代码：AppState（DataLoader + 状态库）+ ApiResponse + 行情/状态路由
+src/app/routes.rs   # 执行代码：AppState（DataLoader + 状态库 + 认证/body 上限）+ ApiResponse + 行情/状态路由
+src/app/auth.rs     # 支撑件：Bearer/Basic 认证中间件（常量时间比较）
 src/app/data_loader.rs # MarketType{Futures,Spot,Dukascopy} + KlineColumns(SoA) + DataLoader：两个 reader + moka 两级缓存（列集按字节计权、目录扫描 60s）；发现层按 reader 约定：binance daily∪monthly、dukascopy 文件名粒度
 src/app/state.rs    # 状态库：layouts/drawings/preferences + backtest_runs 等 CRUD + 限额校验 + SQLite 连接
 src/app/backtest/   # 回测：model 契约 / store SQLite / service 子进程与状态机 / compare 对比与 CSV / routes
 src/app/udf/        # TradingView UDF：symbol/resolution/history/price/protocol/handlers 六个子模块
 python/backtest_worker/ # 数据读取、双均线 vectorbt 引擎、回撤/指标/降采样、CLI
 migrations/         # SQLite 表结构（include_str! 进二进制，启动时幂等建表）
-src/config.rs       # 支撑件：Config{host/port/data_dir/db_path/frontend_dir/cors_origins/backtest} + load/load_from + validate
+src/config.rs       # 支撑件：Config{host/port/data_dir/db_path/frontend_dir/cors_origins/auth_token/max_body_bytes/backtest} + load/load_from + validate
 src/error.rs        # 支撑件：AppError(Io/Config/ConfigRead/ConfigParse/Data/State/InvalidAddr, non_exhaustive)
 src/utils/mod.rs    # 支撑件：valid_pair/valid_timeframe/has_kline_files/has_data_files/timeframe_order
-frontend/           # 前端工程：src/{api,app,backtest,chart,indicators,main,quality,types} + vite.config(dev 5173, proxy /api→3001)
+frontend/           # 前端工程：src/{api,app,backtest,chart,indicators,main,quality,types,viewport} + vite.config(dev 5173, proxy /api→3001)
 ```
 
 ## 实现
@@ -124,6 +127,13 @@ frontend/           # 前端工程：src/{api,app,backtest,chart,indicators,main
 - 响应压缩：客户端带 `Accept-Encoding: gzip` 时由 tower-http 压缩（`Fastest` 级别，只压 >32 字节且非图片/SSE/gRPC 的响应）。实测 1m 全量 4.3 MB → 1.3 MB，release 下多花约 5–10 ms CPU；没有用默认压缩级别，因为本地回环带宽不是瓶颈，默认级别的 CPU 开销换不回相应的传输收益。
 - 时间过滤用二分（`partition_point`）定位窗口，只拷贝窗口内的 bar；`limit` 取窗口内**最后** N 根。
 - `GET /api/quality` 复用同一份缓存列集，输出 bar 数、首尾时间、按周期步长推算的应有 bar 数/缺失数/覆盖率、缺口段数与明细（最多 20 条）、零/负成交量、OHLC 包络异常、非正价格，以及清洗阶段丢弃的重复时间戳/非有限值行数。缺口按数据源周期步长计算，binance `1mo` 按自然月；报告只读缓存，不写状态库。
+
+### 网络边界与认证
+
+- 默认 `host = "127.0.0.1"`，只监听回环。配置 `auth_token` 后，`/api/*` 与 `/udf/*` 都要求 `Authorization: Bearer <token>`，或浏览器 Basic 登录（用户名任意，密码为令牌）。
+- `/api/health` 与 `OPTIONS` 预检豁免；静态页面不拦，否则浏览器无法弹出 Basic 登录框。401 带 `WWW-Authenticate: Basic realm="tradingview"`。
+- 非回环 `host` 未配置令牌时启动失败（`auth_token is required when host is not loopback`）；令牌为空、含空白或控制字符也会被拒绝。认证是单令牌、无会话、无多用户，不内置 TLS；公网部署仍需反向代理终止 TLS，并优先使用 Bearer 或 HTTPS。
+- 请求体上限 `max_body_bytes` 直接传给 `DefaultBodyLimit`，默认 2 MiB，合法范围 1 KiB 至 64 MiB。
 
 ### 并发模型（阻塞 IO 不占 worker）
 
@@ -186,7 +196,7 @@ tokio 的 worker 线程只做调度。读 zip（实测 52ms）这类同步重活
 - `layouts`：命名布局，一行一份**完整会话快照**（`market_type/pair/timeframe/indicators/viewport`）。名称唯一，列表只回摘要，读取详情才回 `payload`。
 - `drawings`：按 `(market_type, pair)` 一行存整组绘图（`lightweight-charts-drawing` 导出的 JSON 数组）。跨周期共享；`PUT` 是整组替换，不是增量合并。
 - `preferences`：KV 合并写入。`last_session` 存最近一次会话，用于启动恢复。
-- 限额：布局 payload ≤ 1 MiB；绘图 ≤ 500 个/对、单图 ≤ 512 锚点、整组 ≤ 1 MiB；偏好 ≤ 128 键 / 256 KiB；HTTP body ≤ 2 MiB。
+- 限额：布局 payload ≤ 1 MiB；绘图 ≤ 500 个/对、单图 ≤ 512 锚点、整组 ≤ 1 MiB；偏好 ≤ 128 键 / 256 KiB；HTTP body 默认 ≤ 2 MiB，由 `max_body_bytes` 配置（1 KiB 至 64 MiB）。
 - 前端自动保存：会话 800ms debounce，绘图 600ms debounce；恢复/加载布局期间用 `suppressSave` 抑制回写，绘图在服务端加载完成前用 `drawingsLoaded` 阻止空画布覆盖。
 
 ## 问题
@@ -200,6 +210,9 @@ tokio 的 worker 线程只做调度。读 zip（实测 52ms）这类同步重活
 - 当生产环境需要收紧跨域时，
   - 解决：`config.cors_origins` 非空时只放行列表内 origin；为空则全放行 + warn
   - 文件：`src/app/mod.rs`、`src/config.rs`
+- 当需要从其他主机访问 API 时，
+  - 解决：必须配置 `auth_token`，启用 Bearer/Basic 认证；非回环监听未配令牌直接启动失败
+  - 文件：`src/app/auth.rs`、`src/config.rs`
 - 当请求试图穿越目录时，
   - 解决：入参校验，单测覆盖 `..` 与绝对路径攻击串
   - 文件：`src/app/routes.rs`（校验逻辑在 `src/utils/mod.rs`）
@@ -231,7 +244,8 @@ tokio 的 worker 线程只做调度。读 zip（实测 52ms）这类同步重活
 src/main.rs         # 入口：dotenv(CWD) → tracing → Config::load → run
 src/lib.rs          # 只做导出 + crate 级 lint + README 内联文档
 src/app/mod.rs      # run(config)：校验/状态/路由/CORS/静态/serve/优雅停机
-src/app/routes.rs   # AppState(DataLoader + 状态库) + ApiResponse + 行情/状态路由 + 穿越防护
+src/app/routes.rs   # AppState(DataLoader + 状态库 + 认证/body 上限) + ApiResponse + 行情/状态路由 + 穿越防护
+src/app/auth.rs     # Bearer/Basic 认证中间件（常量时间比较）
 src/app/data_loader.rs # MarketType + KlineColumns(SoA) + DataLoader：两个 reader + moka
 src/app/state.rs    # StateStore：layouts/drawings/preferences + 回测运行 CRUD + 限额校验 + SQLite
 src/app/backtest/   # 回测：model 契约/store SQLite/service 子进程与状态机/compare 对比与 CSV/routes
@@ -239,10 +253,10 @@ src/app/udf/        # UDF：symbol/resolution/history/price/protocol/handlers
 python/backtest_worker/ # 数据读取、双均线 vectorbt 引擎、回撤/指标/降采样、CLI
 migrations/001_init.sql # layouts/drawings/preferences 表
 migrations/002_backtest.sql # backtest_runs/trades/drawdown_events/equity/underwater 表
-src/config.rs       # Config{host/port/data_dir/db_path/frontend_dir/cors_origins/backtest} + load/load_from + validate
+src/config.rs       # Config{host/port/data_dir/db_path/frontend_dir/cors_origins/auth_token/max_body_bytes/backtest} + load/load_from + validate
 src/error.rs        # AppError(Io/Config/ConfigRead/ConfigParse/Data/State/InvalidAddr, non_exhaustive)
 src/utils/mod.rs    # valid_pair/valid_timeframe/has_kline_files/has_data_files/timeframe_order
-frontend/src/       # api/app/backtest/chart/indicators/main/quality/types + style.css + vite-env
+frontend/src/       # api/app/backtest/chart/indicators/main/quality/types/viewport + style.css + vite-env
 ```
 
 ## 完整配置
@@ -255,6 +269,8 @@ data_dir = "path/to/data"   # 必填，无默认，数据根
 db_path = "path/to/data/tradingview.db"  # 可选，默认 <data_dir>/tradingview.db
 frontend_dir = "/data/tradingview-rs/frontend/dist"   # 可选，默认 <workspace>/frontend/dist
 cors_origins = []           # 可选，默认 [] = 全放行（仅本地开发）
+# auth_token = "change-me"  # 可选；启用 Bearer/Basic 认证，非回环 host 必填
+# max_body_bytes = 2097152  # 可选，默认 2 MiB，范围 1 KiB 至 64 MiB
 
 [backtest]                  # 可选；缺省 enabled=true
 python_bin = "/data/vbt/.venv/bin/python"  # 必需：装有 vectorbt 1.2.0 的解释器
@@ -281,10 +297,11 @@ worker_dir = "python"       # 含 backtest_worker/ 的目录
 - src/app/mod.rs
   - `run(&Config)` 唯一编排：校验 `data_dir` → 打开 `StateStore` → 建 `AppState` → 路由+CORS+静态 → `bind+serve`（优雅停机）
 - src/config.rs
-  - `load()`：按优先级定位配置文件 → `toml::from_str` → 缺省补齐 → `validate()`
+  - `load()`：按优先级定位配置文件 → `toml::from_str` → 缺省补齐 → `validate()`（非回环必须配 `auth_token`，body 上限区间校验）
 - src/error.rs
   - `AppError`（thiserror, non_exhaustive）：Io/Config/ConfigRead/ConfigParse/Data/State/InvalidAddr
 - src/app/routes.rs
+  - 中间件：`DefaultBodyLimit`（`max_body_bytes`）+ Bearer/Basic 认证（`/api/health`、`OPTIONS`、静态资源豁免）
   - 行情 GET：health / market-types / pairs / timeframes / klines / quality
   - 状态：`/api/layouts`、`/api/layouts/{id}`、`/api/drawings`、`/api/preferences`
   - 回测：`/api/backtests`、`/api/backtests/{id}`、`/log`、`/retry`、`/compare`、`/compare.csv`

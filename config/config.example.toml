@@ -4,6 +4,8 @@ data_dir = "path/to/data"  # 必填参数, 无默认值, 须指向行情数据�
 # db_path = "path/to/data/tradingview.db"  # 可选参数, 默认值: <data_dir>/tradingview.db；只存布局/绘图/偏好
 frontend_dir = "/data/tradingview-rs/frontend/dist"  # 可选参数, 默认值: <workspace>/frontend/dist
 # cors_origins = ["http://localhost:5173"]  # 可选参数, 默认值: []（全放行，仅本地开发）
+# auth_token = "change-me"   # 可选参数, 默认值: 无（仅回环监听）；启用 Bearer/Basic 认证，非回环 host 必填
+# max_body_bytes = 2097152   # 可选参数, 默认值: 2 MiB；HTTP 请求体上限，范围 1 KiB..64 MiB
 
 [backtest]
 enabled = true              # 可选参数, 默认值: true；false 时 /api/backtests* 返回 503

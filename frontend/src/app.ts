@@ -21,19 +21,39 @@ import {
   type ChartManager,
   type DrawingTool,
   type LoadDirection,
+  type RangeSelection,
   type Viewport,
 } from './chart';
 import { findIndicator, getAllIndicators, type ActiveIndicator, type IndicatorDef } from './indicators';
 import { qualityBadge } from './quality';
 import type { Kline } from './types';
+import { computeRangeStats, mergeKlines, timeframeMs, windowForViewport } from './viewport';
 import { BacktestPanel } from './backtest';
 
-const PAGE_SIZE = 200;
+/** 边缘补加载的单页根数。 */
+const PAGE_SIZE = 500;
+/** 首屏加载根数：可视 500 根 + 左侧缓冲 1000 根（最新端无未来数据）。 */
+const INITIAL_LOAD_BARS = 1500;
+/** 同区间切换周期时视窗两侧各保留的根数。 */
+const PREFETCH_BARS = 500;
+/** 单次周期切换最多拉取的根数（防御 1d 视窗切 1m 的极端放大）。 */
+const MAX_WINDOW_BARS = 100_000;
+/** 后端 `/api/klines` 单页上限，与 `MAX_KLINE_LIMIT` 保持一致。 */
+const MAX_API_PAGE = 10_000;
 const REPLAY_LIMIT = 2000;
 const PAIR_DROPDOWN_LIMIT = 100;
 const APP_VERSION = 'p7';
 const SESSION_SAVE_DEBOUNCE_MS = 800;
 const DRAWING_SAVE_DEBOUNCE_MS = 600;
+
+/** 成交量紧凑格式：1.23K / 4.56M / 7.89B。 */
+function formatCompact(value: number): string {
+  const abs = Math.abs(value);
+  if (abs >= 1e9) return `${(value / 1e9).toFixed(2)}B`;
+  if (abs >= 1e6) return `${(value / 1e6).toFixed(2)}M`;
+  if (abs >= 1e3) return `${(value / 1e3).toFixed(2)}K`;
+  return value.toFixed(2);
+}
 
 interface IndicatorState {
   id: string;
@@ -75,6 +95,12 @@ export class App {
   private allKlines: Kline[] = [];
   private replay: ReplayState | null = null;
   private preReplayViewport: Viewport | null = null;
+  /** 切周期/恢复布局时待应用的可视区间；首屏加载消费一次。 */
+  private pendingViewport: Viewport | null = null;
+  /** 边缘已确认没有更多数据，避免重复空请求。 */
+  private exhausted: Record<LoadDirection, boolean> = { left: false, right: false };
+  /** 全量加载序号：切周期时旧请求返回后直接丢弃。 */
+  private loadSeq = 0;
   private activeIndicators: ActiveIndicator[] = [];
   /** 已渲染的指标条 id 顺序；回放每帧都会刷新指标，但 DOM 只在增删时重建。 */
   private renderedIndicators = '';
@@ -85,6 +111,7 @@ export class App {
   private pairDropdown: HTMLElement;
   private timeframeSelect: HTMLSelectElement;
   private infoEl: HTMLElement;
+  private rangeInfoEl: HTMLElement;
   private qualityBadgeEl: HTMLElement;
   private qualitySeq = 0;
   private chartContainer: HTMLElement;
@@ -112,6 +139,10 @@ export class App {
   private drawingLoadToken = 0;
   private unbindViewport: (() => void) | null = null;
   private unbindDrawings: (() => void) | null = null;
+  private unbindRange: (() => void) | null = null;
+  /** 当前区间选择；统计计算按动画帧合并。 */
+  private rangeSelection: RangeSelection | null = null;
+  private rangeFrame: number | null = null;
 
   constructor(container: HTMLElement) {
     container.innerHTML = `
@@ -161,6 +192,7 @@ export class App {
           <option value="vertical-line">垂直线</option>
           <option value="rectangle">矩形</option>
           <option value="fib-retracement">斐波那契</option>
+          <option value="date-range">区间选择</option>
           <option value="text">文字</option>
           <option value="arrow">箭头</option>
         </select>
@@ -168,6 +200,7 @@ export class App {
         <button id="drawing-redo" class="time-jump-btn">重做</button>
         <button id="drawing-clear" class="time-jump-btn">清空</button>
         <span class="info" id="info"></span>
+        <span class="range-info" id="range-info" hidden></span>
         <span class="quality-badge" id="quality-badge" hidden></span>
         <span class="app-version" id="app-version"></span>
       </div>
@@ -182,6 +215,7 @@ export class App {
     this.pairDropdown = container.querySelector('#pair-dropdown')!;
     this.timeframeSelect = container.querySelector('#timeframe-select')!;
     this.infoEl = container.querySelector('#info')!;
+    this.rangeInfoEl = container.querySelector('#range-info') as HTMLElement;
     this.qualityBadgeEl = container.querySelector('#quality-badge')!;
     this.chartContainer = container.querySelector('#chart-container')!;
     this.indicatorsEl = container.querySelector('#active-indicators') as HTMLElement;
@@ -625,6 +659,7 @@ export class App {
     this.suppressSave = true;
     try {
       this.teardownChart('加载中...');
+      this.pendingViewport = state.viewport;
       this.marketSelect.value = state.market_type;
       this.activeIndicators = state.indicators.flatMap((s) => {
         const def = findIndicator(s.id);
@@ -632,7 +667,6 @@ export class App {
       });
 
       await this.loadPairs(state.pair, state.timeframe);
-      if (this.chart && state.viewport) this.chart.setViewport(state.viewport);
     } finally {
       this.suppressSave = false;
     }
@@ -729,8 +763,12 @@ export class App {
     const chart = this.chart;
     if (!chart) return;
     this.drawingsLoaded = false;
-    this.unbindViewport = chart.onViewportChange(() => this.scheduleSave());
+    this.unbindViewport = chart.onViewportChange(() => {
+      this.syncViewportAttr();
+      this.scheduleSave();
+    });
     this.unbindDrawings = chart.onDrawingsChange(() => this.scheduleDrawingSave());
+    this.unbindRange = chart.onRangeSelect((range) => this.onRangeSelect(range));
     const tool = this.drawingToolSelect.value;
     chart.setDrawingTool(tool ? (tool as DrawingTool) : null);
     void this.loadDrawingsForPair();
@@ -804,6 +842,21 @@ export class App {
     this.unbindViewport = null;
     this.unbindDrawings?.();
     this.unbindDrawings = null;
+    this.unbindRange?.();
+    this.unbindRange = null;
+    if (this.rangeFrame !== null) {
+      cancelAnimationFrame(this.rangeFrame);
+      this.rangeFrame = null;
+    }
+    this.rangeSelection = null;
+    this.rangeInfoEl.hidden = true;
+    this.rangeInfoEl.textContent = '';
+    this.pendingViewport = null;
+    this.exhausted = { left: false, right: false };
+    this.loadSeq += 1;
+    this.loading = false;
+    delete this.chartContainer.dataset.viewport;
+    delete this.chartContainer.dataset.bars;
     this.chart?.destroy();
     this.chart = null;
     this.allKlines = [];
@@ -904,49 +957,242 @@ export class App {
   }
 
   private async loadKlines(dir?: LoadDirection): Promise<void> {
-    if (this.loading || this.replay) return;
+    // 边缘加载避让全量加载；全量加载总是抢占旧请求（切周期时可能连续触发）。
+    if (this.replay) return;
+    if (dir && this.loading) return;
+    if (dir && this.exhausted[dir]) return;
+    if (dir && !this.chart) return;
+
+    const seq = ++this.loadSeq;
+    const stale = () => seq !== this.loadSeq;
     this.loading = true;
-    this.infoEl.textContent = '加载中...';
+    if (!dir) this.infoEl.textContent = '加载中...';
     try {
-      let klines;
       if (dir === 'left') {
-        const before = this.chart!.getFirstTime()!;
-        klines = await fetchKlines({ marketType: this.marketSelect.value, pair: this._pair, timeframe: this._timeframe, limit: PAGE_SIZE, before });
-        if (klines.klines.length > 0) {
-          this.allKlines = klines.klines.concat(this.allKlines);
-          this.chart!.prependData(klines.klines);
+        const before = this.chart!.getFirstTime();
+        if (before === null) return;
+        const data = await fetchKlines({
+          marketType: this.marketSelect.value,
+          pair: this._pair,
+          timeframe: this._timeframe,
+          limit: PAGE_SIZE,
+          before,
+        });
+        if (stale()) return;
+        const bars = data.klines;
+        if (bars.length > 0) {
+          this.allKlines = bars.concat(this.allKlines);
+          this.chart!.prependData(bars);
           this.refreshIndicators();
         }
+        if (bars.length < PAGE_SIZE) this.exhausted.left = true;
       } else if (dir === 'right') {
-        const after = this.chart!.getLastTime()!;
-        klines = await fetchKlines({ marketType: this.marketSelect.value, pair: this._pair, timeframe: this._timeframe, limit: PAGE_SIZE, after });
-        if (klines.klines.length > 0) {
-          this.allKlines = this.allKlines.concat(klines.klines);
-          this.chart!.appendData(klines.klines);
+        const after = this.chart!.getLastTime();
+        if (after === null) return;
+        const data = await fetchKlines({
+          marketType: this.marketSelect.value,
+          pair: this._pair,
+          timeframe: this._timeframe,
+          limit: PAGE_SIZE,
+          after,
+        });
+        if (stale()) return;
+        const bars = data.klines;
+        if (bars.length > 0) {
+          this.allKlines = this.allKlines.concat(bars);
+          this.chart!.appendData(bars);
           this.refreshIndicators();
         }
+        if (bars.length < PAGE_SIZE) this.exhausted.right = true;
       } else {
         this.invalidateQualityBadge();
         this.chartContainer.innerHTML = '<div class="loading">加载中...</div>';
-        klines = await fetchKlines({ marketType: this.marketSelect.value, pair: this._pair, timeframe: this._timeframe, limit: PAGE_SIZE });
-        this.allKlines = klines.klines;
+        const viewport = this.pendingViewport;
+        this.pendingViewport = null;
+        let klines: Kline[] = [];
+        if (viewport) {
+          klines = await this.fetchWindowKlines(viewport);
+          if (stale()) return;
+        }
+        // 视窗附近没有数据（超出该周期归档范围）时退回最新一段。
+        if (klines.length === 0) {
+          const data = await fetchKlines({
+            marketType: this.marketSelect.value,
+            pair: this._pair,
+            timeframe: this._timeframe,
+            limit: INITIAL_LOAD_BARS,
+          });
+          if (stale()) return;
+          klines = data.klines;
+        }
+        if (klines.length === 0) {
+          this.chartContainer.innerHTML = '<div class="loading">该周期无数据</div>';
+          this.infoEl.textContent = '无数据';
+          return;
+        }
+        this.allKlines = klines;
         this.chartContainer.innerHTML = '<div id="chart" style="height:100%;width:100%"></div>';
         const chartDiv = this.chartContainer.querySelector('#chart')!;
-        this.chart = createChartManager(chartDiv as HTMLElement, (d) => this.loadKlines(d));
+        this.chart = createChartManager(chartDiv as HTMLElement, (d) => void this.loadKlines(d));
         this.bindChart();
-        this.chart.setData(klines.klines);
+        this.chart.setData(klines);
         this.refreshIndicators();
+        await this.applyInitialViewport(viewport);
         this.markAfterPaint('tv:first-screen');
         void this.loadQuality(this.marketSelect.value, this._pair, this._timeframe);
       }
       this.infoEl.textContent = this.dataInfoText();
+      this.syncViewportAttr();
       if (!dir) this.scheduleSave();
     } catch (e) {
-      if (!dir) this.chartContainer.innerHTML = `<div class="loading">加载失败: ${e}</div>`;
-      this.infoEl.textContent = '加载失败';
+      if (!stale() && !dir) this.chartContainer.innerHTML = `<div class="loading">加载失败: ${e}</div>`;
+      if (!stale()) this.infoEl.textContent = '加载失败';
     } finally {
-      this.loading = false;
+      if (seq === this.loadSeq) {
+        this.loading = false;
+        requestAnimationFrame(() => this.loadEdgeIfNeeded());
+      }
     }
+  }
+
+  /** 首屏/切周期后补足视窗两侧的缓冲；耗尽方向不再请求。 */
+  private loadEdgeIfNeeded(): void {
+    if (!this.chart || this.loading || this.replay) return;
+    const dir = this.chart.needsEdgeLoad().find((d) => !this.exhausted[d]);
+    if (dir) void this.loadKlines(dir);
+  }
+
+  /**
+   * 按时间窗分块拉取同区间数据。
+   *
+   * 后端单页上限 10k，按 `before` 从新到旧逐页取，最后按时间去重合并。
+   * 总根数受 [`MAX_WINDOW_BARS`] 限制，防止 1d 视窗切 1m 时把内存打爆。
+   */
+  private async fetchWindowKlines(viewport: Viewport): Promise<Kline[]> {
+    const marketType = this.marketSelect.value;
+    const pair = this._pair;
+    const timeframe = this._timeframe;
+    const barMs = timeframeMs(timeframe);
+    const window = barMs
+      ? windowForViewport(viewport, barMs, PREFETCH_BARS, MAX_WINDOW_BARS)
+      : { from: viewport.from, to: viewport.to };
+    const after = Math.floor(window.from) - 1;
+    let before = Math.ceil(window.to) + 1;
+    const chunks: Kline[][] = [];
+    let total = 0;
+    while (total < MAX_WINDOW_BARS) {
+      const limit = Math.min(MAX_API_PAGE, MAX_WINDOW_BARS - total);
+      const data = await fetchKlines({
+        marketType,
+        pair,
+        timeframe,
+        limit,
+        after,
+        before,
+      });
+      const bars = data.klines;
+      if (bars.length === 0) break;
+      chunks.push(bars);
+      total += bars.length;
+      if (bars.length < limit) break;
+      before = bars[0].time;
+      if (before <= after) break;
+    }
+    return mergeKlines(chunks);
+  }
+
+  /** 把请求的视窗裁剪到已加载数据范围内；越界部分不回退到最新端。 */
+  private applyViewport(viewport: Viewport): boolean {
+    const chart = this.chart;
+    if (!chart) return false;
+    const first = chart.getFirstTime();
+    const last = chart.getLastTime();
+    if (first === null || last === null) return false;
+    const from = Math.max(viewport.from, first);
+    const to = Math.min(viewport.to, last);
+    if (to <= from) return false;
+    chart.setViewport({ from, to });
+    return true;
+  }
+
+  /**
+   * 布局稳定后应用首屏视窗：保存的视窗可用则保持区间，否则显示最新 500 根。
+   *
+   * 图表刚插入 DOM 时尺寸可能还是 0，立即 setVisibleLogicalRange 会被随后的
+   * ResizeObserver 覆盖成默认 barSpacing；放到下一帧再设即可落在真实宽度上。
+   * 返回的 Promise 在两帧后、视窗写入 DOM 属性后完成，调用方可以据此再记录
+   * 性能标记，避免测到默认视窗的中间态。
+   */
+  private applyInitialViewport(viewport: Viewport | null): Promise<void> {
+    return new Promise((resolve) => {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          if (!this.chart) {
+            resolve();
+            return;
+          }
+          if (!viewport || !this.applyViewport(viewport)) {
+            this.chart.showLastBars();
+          }
+          this.syncViewportAttr();
+          resolve();
+        });
+      });
+    });
+  }
+
+  /** 暴露当前视窗给验收脚本：`#chart-container[data-viewport]`。 */
+  private syncViewportAttr(): void {
+    const viewport = this.chart?.getViewport() ?? null;
+    if (viewport) this.chartContainer.dataset.viewport = JSON.stringify(viewport);
+    else delete this.chartContainer.dataset.viewport;
+    this.chartContainer.dataset.bars = String(this.allKlines.length);
+    const visible = this.chart?.getVisibleBars() ?? null;
+    if (visible !== null) this.chartContainer.dataset.visibleBars = String(visible);
+    else delete this.chartContainer.dataset.visibleBars;
+  }
+
+  /** 区间选择（绘图库 date-range）变化：按动画帧合并统计。 */
+  private onRangeSelect(range: RangeSelection | null): void {
+    this.rangeSelection = range;
+    if (this.rangeFrame !== null) return;
+    this.rangeFrame = requestAnimationFrame(() => {
+      this.rangeFrame = null;
+      this.renderRangeInfo();
+    });
+  }
+
+  private renderRangeInfo(): void {
+    const selection = this.rangeSelection;
+    if (!selection || this.allKlines.length === 0) {
+      this.rangeInfoEl.hidden = true;
+      this.rangeInfoEl.textContent = '';
+      delete this.rangeInfoEl.dataset.range;
+      delete this.rangeInfoEl.dataset.stats;
+      return;
+    }
+    const stats = computeRangeStats(this.allKlines, selection.from, selection.to);
+    if (!stats) {
+      this.rangeInfoEl.hidden = true;
+      this.rangeInfoEl.textContent = '';
+      delete this.rangeInfoEl.dataset.range;
+      delete this.rangeInfoEl.dataset.stats;
+      return;
+    }
+    const pct = stats.changePct >= 0 ? `+${stats.changePct.toFixed(2)}` : stats.changePct.toFixed(2);
+    const price = (v: number) => v.toLocaleString('zh-CN', { maximumFractionDigits: 8 });
+    const volume = formatCompact(stats.volume);
+    this.rangeInfoEl.textContent =
+      `${stats.bars} 根 · ${pct}% · 高 ${price(stats.high)} · 低 ${price(stats.low)} · 量 ${volume}`;
+    this.rangeInfoEl.dataset.range = JSON.stringify({ from: stats.from, to: stats.to });
+    this.rangeInfoEl.dataset.stats = JSON.stringify({
+      bars: stats.bars,
+      changePct: stats.changePct,
+      high: stats.high,
+      low: stats.low,
+      volume: stats.volume,
+    });
+    this.rangeInfoEl.hidden = false;
   }
 
   private refreshIndicators() {
@@ -1077,11 +1323,13 @@ export class App {
 
   private async onTimeframeChange(): Promise<void> {
     const started = performance.now();
+    const viewport = this.chart?.getViewport() ?? null;
     this.invalidateQualityBadge();
     await this.flushPendingSaves();
     this._timeframe = this.timeframeSelect.value;
     this.activeIndicators = [];
     this.teardownChart('加载中...');
+    this.pendingViewport = viewport;
     if (this._timeframe) await this.loadKlines();
     this.markAfterPaint(`tv:tf-switch:${this._timeframe}`, started);
     this.scheduleSave();

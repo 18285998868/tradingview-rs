@@ -16,14 +16,14 @@ import {
   type UTCTimestamp,
   type SeriesMarker,
 } from 'lightweight-charts';
-import { DrawingManager, type DrawingKind } from 'lightweight-charts-drawing';
+import { DrawingManager, type Drawing, type DrawingKind } from 'lightweight-charts-drawing';
 import type { Kline, StrategyMarker } from './types';
 import type { ActiveIndicator, SubSeries } from './indicators';
 import { safeCalc } from './indicators';
 import { isTailExtension, tailValuesCompatible } from './incremental';
 
-const BUFFER = 30;
-const INITIAL_VISIBLE_BARS = 50;
+const BUFFER = 500;
+const INITIAL_VISIBLE_BARS = 500;
 const MAIN_STRETCH = 0.6;
 const SUB_STRETCH = 0.4;
 const DRAWING_HISTORY_LIMIT = 50;
@@ -39,6 +39,12 @@ export interface Viewport {
   to: number;
 }
 
+/** 区间选择结果（毫秒时间戳，闭区间）。 */
+export interface RangeSelection {
+  from: number;
+  to: number;
+}
+
 export interface ChartManager {
   setData(klines: Kline[]): void;
   /** 回放用：只替换可见前缀，保留指标/策略层并由调用方随后重算。 */
@@ -50,7 +56,15 @@ export interface ChartManager {
   getLastTime(): number | null;
   getViewport(): Viewport | null;
   setViewport(v: Viewport | null): void;
+  /** 显示最新 N 根（首屏/无保存视窗时使用）。 */
+  showLastBars(bars?: number): void;
+  /** 当前视窗覆盖的逻辑根数（含首尾）。 */
+  getVisibleBars(): number | null;
   onViewportChange(cb: () => void): () => void;
+  /** 当前视窗距离两侧数据边缘是否不足以再翻一页。 */
+  needsEdgeLoad(): LoadDirection[];
+  /** 区间选择（绘图库 date-range）变化；无选择时为 null。 */
+  onRangeSelect(cb: (range: RangeSelection | null) => void): () => void;
   applyIndicators(indicators: ActiveIndicator[], klines: Kline[]): void;
   setBacktestMarkers(markers: StrategyMarker[]): void;
   jumpToTime(time: number): void;
@@ -93,7 +107,13 @@ export function createChartManager(
     },
     crosshair: { mode: CrosshairMode.Normal },
     rightPriceScale: { borderColor: '#45475a' },
-    timeScale: { borderColor: '#45475a', timeVisible: false, borderVisible: true },
+    timeScale: {
+      borderColor: '#45475a',
+      timeVisible: false,
+      borderVisible: true,
+      // 默认 0.5px/根无法容纳 10 万根；放宽到 0.01 以支持密集显示。
+      minBarSpacing: 0.01,
+    },
   });
 
   const candleSeries = chart.addSeries(CandlestickSeries, candleOpts);
@@ -150,14 +170,33 @@ export function createChartManager(
         to: (v.to / 1000) as UTCTimestamp,
       });
     } catch {
-      // 视口落在当前数据之外（例如换了交易对）：回到最新一段。
-      const len = allKlines.length;
-      if (len > INITIAL_VISIBLE_BARS) {
-        chart.timeScale().setVisibleLogicalRange({ from: len - INITIAL_VISIBLE_BARS, to: len });
-      } else {
-        chart.timeScale().fitContent();
-      }
+      showLastBars();
     }
+  }
+
+  /** 显示最新 N 根；数据不足时全量适配。 */
+  function showLastBars(bars = INITIAL_VISIBLE_BARS): void {
+    const len = allKlines.length;
+    if (len > bars) {
+      chart.timeScale().setVisibleLogicalRange({ from: len - bars, to: len });
+    } else {
+      chart.timeScale().fitContent();
+    }
+  }
+
+  /** 视窗离数据边缘不足一页时返回需要补加载的方向。 */
+  function needsEdgeLoad(): LoadDirection[] {
+    const range = chart.timeScale().getVisibleLogicalRange();
+    if (!range || allKlines.length === 0) return [];
+    const out: LoadDirection[] = [];
+    if (range.from < BUFFER) out.push('left');
+    if (allKlines.length - range.to < BUFFER) out.push('right');
+    return out;
+  }
+
+  function getVisibleBars(): number | null {
+    const range = chart.timeScale().getVisibleLogicalRange();
+    return range ? Math.round(range.to - range.from) : null;
   }
 
   // ---- 加载更多 ----
@@ -173,11 +212,20 @@ export function createChartManager(
 
   // ---- resize ----
   function resize() {
+    const range = chart.timeScale().getVisibleLogicalRange();
     chart.resize(wrapper.clientWidth, wrapper.clientHeight);
+    // 尺寸变化会按默认 barSpacing 重算可视区间；保留变化前的逻辑区间，
+    // 否则工具栏换行/窗口缩放会把首屏 500 根冲成默认密度。
+    if (range && range.to > range.from) {
+      chart.timeScale().setVisibleLogicalRange(range);
+    }
   }
 
   const ro = new ResizeObserver(() => resize());
   ro.observe(wrapper);
+  // 容器刚插入 DOM 时先同步量一次尺寸；否则首屏 setVisibleLogicalRange
+  // 可能按 0 宽计算，恢复会话后只剩几根。
+  resize();
 
   function toCandleAt(k: Kline): CandlestickData {
     return {
@@ -371,6 +419,47 @@ export function createChartManager(
 
   const offDrawingChange = drawings.on('change', recordDrawings);
 
+  // ---- 区间选择（date-range 绘图）----
+  let rangeCb: ((range: RangeSelection | null) => void) | null = null;
+  let activeRangeId: string | null = null;
+
+  function drawingTimeMs(time: Time): number | null {
+    if (typeof time === 'number') return time * 1000;
+    if (typeof time === 'string') {
+      const ms = Date.parse(time);
+      return Number.isNaN(ms) ? null : ms;
+    }
+    if (typeof time === 'object' && time !== null) {
+      return Date.UTC(time.year, time.month - 1, time.day);
+    }
+    return null;
+  }
+
+  function rangeOfDrawing(d: Drawing): RangeSelection | null {
+    if (d.kind !== 'date-range') return null;
+    const [a, b] = d.points;
+    const ta = drawingTimeMs(a.time);
+    const tb = drawingTimeMs(b.time);
+    if (ta === null || tb === null) return null;
+    return { from: Math.min(ta, tb), to: Math.max(ta, tb) };
+  }
+
+  /** 选中最近一次使用的 date-range；没有则清空统计。 */
+  function emitRange(list: readonly Drawing[] = drawings.drawings()): void {
+    if (!rangeCb) return;
+    const ranges = list.filter((d) => d.kind === 'date-range');
+    if (ranges.length === 0) {
+      activeRangeId = null;
+      rangeCb(null);
+      return;
+    }
+    const active = ranges.find((d) => d.id === activeRangeId) ?? ranges[ranges.length - 1];
+    activeRangeId = active.id;
+    rangeCb(rangeOfDrawing(active));
+  }
+
+  const offRangeChange = drawings.on('change', (list) => emitRange(list));
+
   function restoreDrawingHistory(json: string) {
     drawingSuppress = true;
     try {
@@ -390,12 +479,7 @@ export function createChartManager(
       backtestMarkers = [];
       candleSeries.setData(candleData);
       renderBacktestMarkers();
-      const len = klines.length;
-      if (len > INITIAL_VISIBLE_BARS) {
-        chart.timeScale().setVisibleLogicalRange({ from: len - INITIAL_VISIBLE_BARS, to: len });
-      } else {
-        chart.timeScale().fitContent();
-      }
+      showLastBars();
     },
 
     updateData(klines: Kline[], visibleBars = INITIAL_VISIBLE_BARS) {
@@ -473,10 +557,24 @@ export function createChartManager(
 
     setViewport,
 
+    showLastBars,
+
+    getVisibleBars,
+
     onViewportChange(cb: () => void) {
       viewportCb = cb;
       return () => {
         if (viewportCb === cb) viewportCb = null;
+      };
+    },
+
+    needsEdgeLoad,
+
+    onRangeSelect(cb: (range: RangeSelection | null) => void) {
+      rangeCb = cb;
+      emitRange();
+      return () => {
+        if (rangeCb === cb) rangeCb = null;
       };
     },
 
@@ -680,6 +778,7 @@ export function createChartManager(
       restoreDrawingHistory(json);
       drawingHistory = [drawings.exportJSON()];
       drawingHistoryIndex = 0;
+      emitRange();
     },
 
     clearDrawings() {
@@ -693,6 +792,7 @@ export function createChartManager(
         }
         drawingHistoryIndex = drawingHistory.length - 1;
       }
+      emitRange();
       notifyDrawingsChange();
     },
 
@@ -720,6 +820,8 @@ export function createChartManager(
     destroy() {
       if (drawingTimer !== null) window.clearTimeout(drawingTimer);
       offDrawingChange();
+      offRangeChange();
+      rangeCb = null;
       drawings.destroy();
       ro.disconnect();
       clearOverlays();

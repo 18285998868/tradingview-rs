@@ -54,6 +54,16 @@ html, body, #app {
   white-space: nowrap;
 }
 
+.toolbar .range-info {
+  font-size: 11px;
+  padding: 2px 8px;
+  border: 1px solid #45475a;
+  border-radius: 999px;
+  background: #313244;
+  color: #cdd6f4;
+  white-space: nowrap;
+}
+
 .toolbar .quality-badge {
   font-size: 11px;
   padding: 2px 7px;

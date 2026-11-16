@@ -1,5 +1,6 @@
 //! 服务编排：校验 → 状态 → 路由 → 监听 → 优雅停机。
 
+pub mod auth;
 pub mod backtest;
 pub mod data_loader;
 pub mod quality;
@@ -106,6 +107,16 @@ pub async fn run(config: &Config) -> Result<(), AppError> {
         tracing::warn!("backtest API disabled by config");
         AppState::new(data_dir.clone(), state_store)
     };
+    let app_state = app_state
+        .with_auth_token(config.auth_token.clone())
+        .with_max_body_bytes(config.max_body_bytes);
+    if config.auth_token.is_some() {
+        tracing::info!("API authentication enabled (Bearer / Basic)");
+    } else {
+        tracing::warn!(
+            "API authentication disabled — keep host loopback-only or put a reverse proxy in front"
+        );
+    }
 
     let frontend_dir = config.frontend_dir.clone();
     if !frontend_dir.is_dir() {

@@ -24,6 +24,10 @@ pub struct AppState {
     pub(crate) state_store: Arc<StateStore>,
     /// 回测服务；配置关闭时为 `None`（路由返回 503）。
     pub(crate) backtest: Option<Arc<super::backtest::service::BacktestService>>,
+    /// API 认证令牌；`None` = 关闭。
+    pub(crate) auth_token: Option<Arc<str>>,
+    /// 单次请求体上限（字节）。
+    pub(crate) max_body_bytes: usize,
 }
 
 impl AppState {
@@ -33,7 +37,21 @@ impl AppState {
             data_loader: Arc::new(DataLoader::new(data_dir)),
             state_store,
             backtest: None,
+            auth_token: None,
+            max_body_bytes: crate::config::DEFAULT_MAX_BODY_BYTES,
         }
+    }
+
+    /// 设置认证令牌（`None` 或空串 = 关闭）。
+    pub fn with_auth_token(mut self, token: Option<String>) -> Self {
+        self.auth_token = token.filter(|t| !t.is_empty()).map(Arc::from);
+        self
+    }
+
+    /// 设置请求体上限（由配置校验保证在合法区间）。
+    pub fn with_max_body_bytes(mut self, bytes: usize) -> Self {
+        self.max_body_bytes = bytes;
+        self
     }
 
     /// 挂载回测服务。
@@ -639,7 +657,11 @@ pub fn create_router(app_state: AppState) -> Router {
             axum::routing::get(super::udf::history_handler),
         )
         .merge(super::backtest::routes::router())
-        .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
+        .layer(DefaultBodyLimit::max(app_state.max_body_bytes))
+        .layer(axum::middleware::from_fn_with_state(
+            app_state.auth_token.clone(),
+            super::auth::require_auth,
+        ))
         .with_state(app_state)
 }
 
@@ -1069,5 +1091,116 @@ mod tests {
             "BTCUSDT"
         );
         assert_eq!(body["data"]["preferences"]["theme"], "dark");
+    }
+
+    fn test_app_with_auth(token: Option<&str>) -> Router {
+        let store = Arc::new(StateStore::open_in_memory().unwrap());
+        create_router(
+            AppState::new(PathBuf::new(), store).with_auth_token(token.map(str::to_string)),
+        )
+    }
+
+    fn get_with_auth(uri: &str, authorization: Option<&str>) -> Request<Body> {
+        let mut builder = Request::builder().uri(uri);
+        if let Some(value) = authorization {
+            builder = builder.header("authorization", value);
+        }
+        builder.body(Body::empty()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_auth_rejects_missing_or_wrong_token() {
+        let app = test_app_with_auth(Some("secret-token"));
+
+        let res = app
+            .clone()
+            .oneshot(get_with_auth("/api/layouts", None))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            res.headers()
+                .get("www-authenticate")
+                .and_then(|v| v.to_str().ok()),
+            Some("Basic realm=\"tradingview\"")
+        );
+
+        let res = app
+            .clone()
+            .oneshot(get_with_auth("/api/layouts", Some("Bearer wrong")))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+        let res = app
+            .oneshot(get_with_auth("/api/layouts", Some("Basic !!!")))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_auth_accepts_bearer_and_basic() {
+        let app = test_app_with_auth(Some("secret-token"));
+
+        let res = app
+            .clone()
+            .oneshot(get_with_auth("/api/layouts", Some("Bearer secret-token")))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // "user:secret-token"
+        let res = app
+            .oneshot(get_with_auth(
+                "/api/layouts",
+                Some("Basic dXNlcjpzZWNyZXQtdG9rZW4="),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_auth_exempts_health_and_options() {
+        let app = test_app_with_auth(Some("secret-token"));
+
+        let res = app
+            .clone()
+            .oneshot(get_with_auth("/api/health", None))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let res = app
+            .clone()
+            .oneshot(get_with_auth("/udf/history", None))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/api/layouts")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_body_limit_is_configurable() {
+        let store = Arc::new(StateStore::open_in_memory().unwrap());
+        let app = create_router(AppState::new(PathBuf::new(), store).with_max_body_bytes(1024));
+        let payload = serde_json::json!({ "name": "x".repeat(2048) });
+        let res = app
+            .oneshot(json_request("POST", "/api/layouts", payload))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 }

@@ -17,6 +17,12 @@
 - 前端图表增量刷新：`updateData` / `appendData` 在“前缀不变、只追加或改写最后一根”时改用 `series.update()`，不再整段 `setData`；指标序列同样只更新尾部，回放逐根前进不再重建整条线。
 - `prependData` 仍整段 `setData`（lightweight-charts 没有 prepend API），但只转换新增的 K 线前缀。
 - 指标条 DOM 只在增删/换序时重建；回放每帧不再重写 `innerHTML`。
+- 首屏预取改为默认视窗 500 根、首次加载 1500 根；保存视窗位于中段时两侧各预取 500 根，最新端左侧缓冲 1000 根。`tv:first-screen` 在视窗应用并写入 `data-viewport` 后才记录。
+- 周期切换保持当前时间区间：切换前记录视窗，按时间窗分块拉取（单页 10k、总上限 100k），布局稳定后重新应用同一区间；目标周期数据不足时收敛到数据边界。`tv:tf-switch:<tf>` 同样在应用视窗后记录。
+- 1m 万根视窗支持：`minBarSpacing` 放宽到 0.01，首屏/无保存视窗时显示最新 500 根，滚动到距数据边缘不足 500 根时按页补载。
+- `date-range` 绘图选择实时统计根数、涨跌幅、最高、最低与成交量；刷新后按服务端绘图恢复，清空绘图后统计隐藏。
+- 新增 `auth_token` 配置：启用后 `/api/*` 与 `/udf/*` 要求 `Authorization: Bearer <token>` 或 Basic（用户名任意，密码为令牌）；`/api/health` 与 `OPTIONS` 豁免，静态页面不拦；非回环 `host` 未配置令牌时启动失败。
+- 请求体上限改为 `max_body_bytes` 配置项（1 KiB 至 64 MiB，默认 2 MiB），传给 `DefaultBodyLimit`；原先固定 2 MiB。
 
 - `Cargo.toml`：tokio 增加 `process` / `time`，用于 Python worker 子进程、超时与增量读取 stdout/stderr；未新增其他 crate。
 - `src/config.rs`：新增 `[backtest]` 配置段（`enabled`/`python_bin`/`worker_dir`/`output_dir`/`timeout_secs`/`max_concurrent`/`max_compare_runs`/`max_grid_runs`/`max_curve_points`/`max_trades`/`keep_equity`），缺省启用；`enabled = false` 时 `/api/backtests*` 返回 503。
@@ -42,6 +48,8 @@
 - `STEP.d/05-compression.md`：gzip 级别取舍与 ETag 决策。
 - `tests/http_compression_test.rs`：gzip 往返字节相等、小响应不压、`identity` 不压。
 - `src/incremental.ts` + `scripts/chart-incremental.test.mjs`：图表尾部增量判定的纯函数与测试（追加、最后一根改写、缩短/乱序回退、指标前缀兼容）。
+- `src/app/auth.rs`：Bearer/Basic 认证中间件、Base64 解码与常量时间比较，含缺失/错误令牌与 `WWW-Authenticate` 测试。
+- `frontend/src/viewport.ts` + `scripts/viewport.test.mjs`：分块合并去重、视窗取数窗口、区间统计与 100k 根上限的纯函数与测试。
 - `STEP.d/06-frontend-incremental.md`：前端增量更新范围与指标重算成本。
 - `python/backtest_worker/`：Binance 现货 zip 读取（12 个原生周期，2025 起的微秒时间戳归一为毫秒）、双均线只做多 vectorbt 1.2.0 引擎（T 收盘信号、T+1 开盘成交）、回撤事件与指标、保端点降采样、参数扫描与 CLI；单组失败只标记该组。
 - `python/tests/`：35 个 unittest，覆盖数据读取（含 2025 起微秒时间戳）、引擎无前视、收盘权益、成本公式、回撤事件、指标公式、降采样、确定性与 CLI 契约。
@@ -59,5 +67,7 @@
 
 ### Fixed
 
+- `tv:first-screen` / `tv:tf-switch:*` 曾在视窗应用前记录，测量到默认 227 根的中间态；`applyInitialViewport` 改为返回 Promise 并由调用方 await。
+- 容器尺寸变化时 lightweight-charts 会把首屏 500 根重置为默认密度；`resize()` 现在保留变化前的逻辑区间。
 - 回测权益在开盘价 mark-to-market：旧实现 `from_orders(targetpercent)` 只有一个价格序列，成交价与估值价都用开盘价，导致权益、回撤与收益偏差；现按收盘价重建权益，新增 `test_equity_is_marked_to_close_not_open` 回归测试。
 - 对比面板 wrapper 与入口按钮重复使用 `id="bt-compare"`；wrapper 改为 `bt-compare-root`，按钮保留原 id，避免 DOM 查询命中错误节点。

@@ -1,5 +1,6 @@
 //! 服务配置：固定路径 TOML → 强类型配置 → 语义校验。
 
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -11,6 +12,13 @@ const CONFIG_REL_PATH: &str = "config/config.toml";
 
 /// 配置文件路径覆盖环境变量。
 pub const CONFIG_PATH_ENV: &str = "TRADINGVIEW_CONFIG";
+
+/// 默认请求体上限：2 MiB。
+pub const DEFAULT_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+/// 请求体上限下限：1 KiB。
+pub const MIN_MAX_BODY_BYTES: usize = 1024;
+/// 请求体上限上限：64 MiB。
+pub const MAX_MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 /// 服务配置。
 ///
@@ -36,6 +44,13 @@ pub struct Config {
     /// 非空时只放行列表内的 origin，并回显匹配的 origin。
     #[serde(default)]
     pub cors_origins: Vec<String>,
+    /// API 认证令牌；`None` 表示不启用认证（仅允许回环监听）。
+    ///
+    /// 启用后接受 `Authorization: Bearer <token>`，或浏览器 Basic 登录
+    /// （用户名任意，密码为令牌）。
+    pub auth_token: Option<String>,
+    /// 单次 HTTP 请求体上限（字节），默认 2 MiB。
+    pub max_body_bytes: usize,
     /// 回测与 Python worker 配置。
     #[serde(default)]
     pub backtest: BacktestConfig,
@@ -99,6 +114,8 @@ impl Default for Config {
             db_path: None,
             frontend_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("frontend/dist"),
             cors_origins: Vec::new(),
+            auth_token: None,
+            max_body_bytes: DEFAULT_MAX_BODY_BYTES,
             backtest: BacktestConfig::default(),
         }
     }
@@ -133,10 +150,12 @@ impl Config {
         cfg.validate()
     }
 
-    /// 语义校验：`data_dir` 必填；`db_path` 若显式给出则不能为空。
+    /// 语义校验：`data_dir` 必填；`db_path` 若显式给出则不能为空；
+    /// 非回环监听必须配置 `auth_token`。
     ///
     /// # Errors
-    /// `data_dir` 或 `db_path` 为空、回测参数越界时返回 [`AppError::Config`]。
+    /// `data_dir` 或 `db_path` 为空、回测参数越界、认证/请求体配置非法时
+    /// 返回 [`AppError::Config`]。
     pub fn validate(self) -> Result<Self, AppError> {
         if self.data_dir.as_os_str().is_empty() {
             return Err(AppError::Config("data_dir must not be empty".into()));
@@ -147,6 +166,31 @@ impl Config {
             .is_some_and(|p| p.as_os_str().is_empty())
         {
             return Err(AppError::Config("db_path must not be empty".into()));
+        }
+        let host: IpAddr = self
+            .host
+            .parse()
+            .map_err(|_| AppError::Config(format!("host must be an IP address: {}", self.host)))?;
+        if let Some(token) = &self.auth_token {
+            if token.trim().is_empty() {
+                return Err(AppError::Config("auth_token must not be empty".into()));
+            }
+            if token.chars().any(|c| c.is_whitespace() || c.is_control()) {
+                return Err(AppError::Config(
+                    "auth_token must not contain whitespace or control characters".into(),
+                ));
+            }
+        }
+        if !host.is_loopback() && self.auth_token.is_none() {
+            return Err(AppError::Config(format!(
+                "auth_token is required when host is not loopback: {}",
+                self.host
+            )));
+        }
+        if !(MIN_MAX_BODY_BYTES..=MAX_MAX_BODY_BYTES).contains(&self.max_body_bytes) {
+            return Err(AppError::Config(format!(
+                "max_body_bytes must be in {MIN_MAX_BODY_BYTES}..={MAX_MAX_BODY_BYTES}"
+            )));
         }
         self.backtest.validate()?;
         Ok(self)
@@ -247,6 +291,8 @@ mod tests {
         assert_eq!(cfg.data_dir, PathBuf::from("/tmp/data"));
         assert!(cfg.frontend_dir.ends_with("frontend/dist"));
         assert!(cfg.db_path.is_none());
+        assert!(cfg.auth_token.is_none());
+        assert_eq!(cfg.max_body_bytes, DEFAULT_MAX_BODY_BYTES);
         assert!(cfg.backtest.enabled);
         assert_eq!(cfg.backtest.max_compare_runs, 10);
         assert_eq!(cfg.backtest.max_grid_runs, 100);
@@ -329,5 +375,79 @@ mod tests {
         assert!(matches!(err, AppError::ConfigRead { .. }));
         // source 链保留底层 io 错误
         assert!(std::error::Error::source(&err).is_some());
+    }
+
+    #[test]
+    fn accepts_auth_token_and_body_limit() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = write_cfg(
+            dir.path(),
+            "data_dir = \"/tmp/data\"\n\
+             auth_token = \"s3cret-token\"\n\
+             max_body_bytes = 1048576\n",
+        );
+        let cfg = Config::load_from(&path).unwrap();
+        assert_eq!(cfg.auth_token.as_deref(), Some("s3cret-token"));
+        assert_eq!(cfg.max_body_bytes, 1024 * 1024);
+    }
+
+    #[test]
+    fn rejects_non_loopback_without_token() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = write_cfg(dir.path(), "data_dir = \"/tmp/data\"\nhost = \"0.0.0.0\"\n");
+        let err = Config::load_from(&path).unwrap_err();
+        assert!(matches!(err, AppError::Config(_)));
+        assert!(err.to_string().contains("auth_token is required"));
+    }
+
+    #[test]
+    fn accepts_non_loopback_with_token() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = write_cfg(
+            dir.path(),
+            "data_dir = \"/tmp/data\"\nhost = \"::\"\nauth_token = \"tok\"\n",
+        );
+        let cfg = Config::load_from(&path).unwrap();
+        assert_eq!(cfg.host, "::");
+    }
+
+    #[test]
+    fn rejects_empty_or_whitespace_token() {
+        for token in ["\"\"", "\"   \""] {
+            let dir = tempfile::TempDir::new().unwrap();
+            let path = write_cfg(
+                dir.path(),
+                &format!("data_dir = \"/tmp/data\"\nauth_token = {token}\n"),
+            );
+            let err = Config::load_from(&path).unwrap_err();
+            assert!(matches!(err, AppError::Config(_)));
+            assert!(err.to_string().contains("auth_token"));
+        }
+    }
+
+    #[test]
+    fn rejects_body_limit_out_of_range() {
+        for bytes in [0usize, 512, MAX_MAX_BODY_BYTES + 1] {
+            let dir = tempfile::TempDir::new().unwrap();
+            let path = write_cfg(
+                dir.path(),
+                &format!("data_dir = \"/tmp/data\"\nmax_body_bytes = {bytes}\n"),
+            );
+            let err = Config::load_from(&path).unwrap_err();
+            assert!(matches!(err, AppError::Config(_)));
+            assert!(err.to_string().contains("max_body_bytes"));
+        }
+    }
+
+    #[test]
+    fn rejects_host_that_is_not_an_ip() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = write_cfg(
+            dir.path(),
+            "data_dir = \"/tmp/data\"\nhost = \"localhost\"\n",
+        );
+        let err = Config::load_from(&path).unwrap_err();
+        assert!(matches!(err, AppError::Config(_)));
+        assert!(err.to_string().contains("host must be an IP address"));
     }
 }

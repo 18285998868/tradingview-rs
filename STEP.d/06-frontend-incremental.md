@@ -66,29 +66,30 @@ node node_modules/typescript/bin/tsc -p tsconfig.json --noEmit
 node --test scripts/*.test.mjs
 ```
 
-`tsc --noEmit` 通过，19 个前端测试全部通过。`node_modules` 不进入仓库。
+`tsc --noEmit` 通过，28 个前端测试全部通过。`node_modules` 不进入仓库。
 
-`npm test` 跑两个文件：
+`npm test` 跑三个文件：
 
 - `scripts/indicators.parity.test.mjs`：26 个指标的 parity（原有用例不变）；
-- `scripts/chart-incremental.test.mjs`：尾部扩展、最后一根改写、缩短/改时间/乱序回退、指标前缀兼容、有值变无值回退。
+- `scripts/chart-incremental.test.mjs`：尾部扩展、最后一根改写、缩短/改时间/乱序回退、指标前缀兼容、有值变无值回退；
+- `scripts/viewport.test.mjs`：分块合并去重、区间统计、周期步长、取数窗口与 100k 上限截断。
 
 ## 浏览器冒烟
 
-构建：Vite 6.4.2（`frontend/node_modules` 已被 gitignore），104 个模块，产物 `index-*.js` 486.58 kB（gzip 148.74 kB）、`index-*.css` 6.09 kB（gzip 1.57 kB）。
+构建：Vite 6.4.2（`frontend/node_modules` 已被 gitignore），107 个模块，产物 `index-*.js` 505.99 kB（gzip 154.88 kB）、`index-*.css` 9.77 kB（gzip 2.38 kB）。JS 超过 Vite 默认的 500 kB 告警线，是单页应用把 lightweight-charts、绘图库与 26 个指标打包在一起的预期结果。
 
 运行：release 二进制 + `/tmp` 状态库 + headless Firefox（geckodriver 0.37.1），预置 `last_session` 为 `futures/BTCUSDT/1h`，指标 SMA + MACD。
 
 | 操作 | 结果 |
 |---|---|
-| 首次加载 | 图表与 MACD 子窗格渲染，`400 条K线`（初始自动向右预取一页） |
-| 进入回放 | `1801 / 2000`，光标在 2026-11-06 00:00 |
-| 步进 5 次 | `1806 / 2000` |
-| 播放 1.2 s 后暂停 | `1807 / 2000` |
-| 重置 | 回到 `1801 / 2000`（前缀缩短，走整段 `setData` 回退） |
+| 首次加载 | 图表与 MACD 子窗格渲染，`1500 条K线`，可视 500 根（最新端无右侧缓冲，左侧 1000 根） |
+| 进入回放 | `1501 / 2000`，光标在 2026-10-24 12:00 |
+| 步进 5 次 | `1506 / 2000` |
+| 播放 1.2 s 后暂停 | `1507 / 2000` |
+| 重置 | 回到 `1501 / 2000`（前缀缩短，走整段 `setData` 回退） |
 | 退出回放 | 恢复 `2000 条K线`，回放控件隐藏，视口回到进入前 |
 
-全程指标条保持 SMA/MACD 两个 chip，未重建；控制台只有浏览器的 `ResizeObserver loop completed with undelivered notifications` 警告，没有应用异常。该冒烟覆盖了尾部增量、播放/步进、重置回退、退出全量重绘四条路径。
+全程指标条保持 SMA/MACD 两个 chip；控制台只有浏览器的 `ResizeObserver loop completed with undelivered notifications` 警告，没有应用异常。该冒烟覆盖了尾部增量、播放/步进、重置回退、退出全量重绘四条路径。
 
 ## 取舍
 
@@ -96,4 +97,4 @@ node --test scripts/*.test.mjs
 2. 指标仍全量计算，只是全量“重绘”变成尾部更新。真正的增量指标计算需要为 26 个指标分别定义带状态的累加器，并与 parity 口径逐点对齐，风险和收益不匹配。
 3. 尾部判定多了一次 O(n) 比较；相对 `setData` 的内部重建可以忽略，且判定失败即回退，不影响正确性。
 4. 指标条 memo 只比较 id，不比较参数：参数变化只影响图形，不影响 chip 文案与事件绑定。
-5. `frontend/dist` 是入库产物；改 `frontend/src` 后必须重建并提交 `dist`。本次已用 A4 源码重建，替换旧的 `index-5ndkP3nD.js`。
+5. `frontend/dist` 是入库产物；改 `frontend/src` 后必须重建并提交 `dist`。本次已用当前源码重建，替换上一版 `index-0YMn3G_M.js`。
