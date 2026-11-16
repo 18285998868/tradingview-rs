@@ -10,6 +10,7 @@ use serde::Serialize;
 use thiserror::Error;
 use tracing::instrument;
 
+use super::quality::{self, BarStep, QualityReport};
 use crate::utils::{has_data_files, has_kline_files, timeframe_order};
 
 /// 单个数据集超过该行数时打告警（内存占用提示）。
@@ -166,6 +167,18 @@ pub struct Kline {
     pub volume: f64,
 }
 
+/// 清洗阶段丢弃的行数。
+///
+/// reader 通常已拒绝重复时间戳与非法 OHLC；这里记录的是本层列集构造时的
+/// 兜底清洗，防止数据源换实现后静默丢行。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CleanStats {
+    /// OHLCV 任一项为非有限值（NaN / 无穷）的行数。
+    pub non_finite: usize,
+    /// 时间戳与上一行重复的行数（保留首行）。
+    pub duplicate: usize,
+}
+
 /// 与 bar 对齐的 6 条列（SoA 布局）。
 ///
 /// 缓存与回测都直接消费列切片：vta 引擎要的是 `&[f64]`，若中间层存
@@ -184,6 +197,8 @@ pub struct KlineColumns {
     pub close: Vec<f64>,
     /// 成交量。
     pub volume: Vec<f64>,
+    /// 清洗阶段丢弃的行数；切片不携带该统计。
+    clean: CleanStats,
 }
 
 /// 六列的原始向量，按 `time/open/high/low/close/volume` 排列。
@@ -199,6 +214,7 @@ impl KlineColumns {
             low: Vec::with_capacity(n),
             close: Vec::with_capacity(n),
             volume: Vec::with_capacity(n),
+            clean: CleanStats::default(),
         }
     }
 
@@ -206,7 +222,7 @@ impl KlineColumns {
     ///
     /// reader 已保证输出按 `open_time` 升序且已去重，这里再做一次是
     /// 防御性兜底（数据源换实现时不至于静默产出重复 bar）。
-    fn from_parts(parts: ColumnParts) -> Self {
+    pub(crate) fn from_parts(parts: ColumnParts) -> Self {
         let (time, open, high, low, close, volume) = parts;
 
         let mut cols = Self::with_capacity(time.len());
@@ -219,9 +235,11 @@ impl KlineColumns {
                 || !c.is_finite()
                 || !v.is_finite()
             {
+                cols.clean.non_finite += 1;
                 continue;
             }
             if last_time == Some(time[i]) {
+                cols.clean.duplicate += 1;
                 continue;
             }
             last_time = Some(time[i]);
@@ -245,6 +263,12 @@ impl KlineColumns {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.time.is_empty()
+    }
+
+    /// 清洗阶段丢弃的行数（切片不携带该统计）。
+    #[must_use]
+    pub fn clean_stats(&self) -> CleanStats {
+        self.clean
     }
 
     /// 常驻堆内存的估算值（KiB，向上取整，至少 1）。
@@ -274,6 +298,8 @@ impl KlineColumns {
             low: self.low[start..end].to_vec(),
             close: self.close[start..end].to_vec(),
             volume: self.volume[start..end].to_vec(),
+            // 切片是派生视图，清洗统计只对整段列集有意义。
+            clean: CleanStats::default(),
         }
     }
 
@@ -653,6 +679,28 @@ impl DataLoader {
             return Ok(all);
         }
         Ok(Arc::new(all.slice(range)))
+    }
+
+    /// 生成数据质量报告。
+    ///
+    /// 统计基于缓存中的整段列集；缺口按数据源的周期步长计算
+    /// （binance `1mo` 走自然月，其余为固定毫秒）。读盘与统计都在调用方
+    /// 的 blocking 线程里执行。
+    pub fn quality_report(
+        &self,
+        market_type: MarketType,
+        pair: &str,
+        timeframe: &str,
+    ) -> Result<QualityReport, DataError> {
+        let step = BarStep::for_market_timeframe(market_type, timeframe)?;
+        let columns = self.load_all_klines(market_type, pair, timeframe)?;
+        Ok(quality::analyze(
+            market_type,
+            pair,
+            timeframe,
+            &columns,
+            step,
+        ))
     }
 
     /// 读取全部 K 线列（带缓存 + single-flight）。
@@ -1330,6 +1378,8 @@ mod tests {
         ));
         assert_eq!(cols.len(), 2);
         assert_eq!(cols.time, vec![BASE_MS, BASE_MS + 2 * HOUR_MS]);
+        assert_eq!(cols.clean_stats().non_finite, 1);
+        assert_eq!(cols.clean_stats().duplicate, 0);
     }
 
     #[test]
@@ -1345,6 +1395,8 @@ mod tests {
         ));
         assert_eq!(cols.len(), 2);
         assert_eq!(cols.close, vec![102.0, 106.0]);
+        assert_eq!(cols.clean_stats().non_finite, 0);
+        assert_eq!(cols.clean_stats().duplicate, 1);
     }
 
     #[test]
@@ -1505,6 +1557,7 @@ mod tests {
             low: vec![0.0; 10_000],
             close: vec![0.0; 10_000],
             volume: vec![0.0; 10_000],
+            clean: CleanStats::default(),
         };
         assert_eq!(cols.weight_kib(), 469);
         assert_eq!(KlineColumns::default().weight_kib(), 1);

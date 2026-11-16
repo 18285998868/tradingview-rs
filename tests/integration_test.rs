@@ -209,3 +209,60 @@ fn test_columns_api_matches_klines_api() {
         assert_eq!(cols.volume[i], k.volume);
     }
 }
+
+#[test]
+fn test_quality_report_counts_gaps_and_zero_volume() {
+    let dir = TempDir::new().unwrap();
+    write_zip(
+        dir.path(),
+        "BTCUSDT",
+        "1h",
+        &[
+            (BASE_MS, 100.0, 105.0, 95.0, 102.0, 10.0),
+            (BASE_MS + HOUR_MS, 102.0, 107.0, 97.0, 104.0, 0.0),
+            (BASE_MS + 4 * HOUR_MS, 104.0, 109.0, 99.0, 106.0, 30.0),
+        ],
+        "2024-01-01",
+    );
+
+    let loader = DataLoader::new(dir.path());
+    let report = loader
+        .quality_report(MarketType::Futures, "BTCUSDT", "1h")
+        .unwrap();
+
+    assert_eq!(report.market_type, "futures");
+    assert_eq!(report.pair, "BTCUSDT");
+    assert_eq!(report.timeframe, "1h");
+    assert_eq!(report.bar_count, 3);
+    assert_eq!(report.first_time, Some(BASE_MS));
+    assert_eq!(report.last_time, Some(BASE_MS + 4 * HOUR_MS));
+    assert_eq!(report.expected_bars, 5);
+    assert_eq!(report.missing_bars, 2);
+    assert_eq!(report.coverage, 0.6);
+    assert_eq!(report.gap_count, 1);
+    assert_eq!(report.longest_gap_bars, 2);
+    assert_eq!(report.gaps.len(), 1);
+    assert_eq!(report.gaps[0].after, BASE_MS + HOUR_MS);
+    assert_eq!(report.gaps[0].before, BASE_MS + 4 * HOUR_MS);
+    assert_eq!(report.gaps[0].missing_bars, 2);
+    assert!(!report.gaps_truncated);
+    assert_eq!(report.zero_volume_bars, 1);
+    assert_eq!(report.negative_volume_bars, 0);
+    assert_eq!(report.bad_ohlc_bars, 0);
+    assert_eq!(report.non_positive_price_bars, 0);
+    assert_eq!(report.duplicate_rows, 0);
+    assert_eq!(report.non_finite_rows, 0);
+}
+
+#[test]
+fn test_quality_report_rejects_invalid_timeframe() {
+    let dir = TempDir::new().unwrap();
+    let loader = DataLoader::new(dir.path());
+    let err = loader
+        .quality_report(MarketType::Futures, "BTCUSDT", "not-a-timeframe")
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        tradingview_backend::app::data_loader::DataError::InvalidParam(_)
+    ));
+}

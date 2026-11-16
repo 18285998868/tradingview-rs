@@ -1,6 +1,7 @@
 //! 服务编排：校验 → 状态 → 路由 → 监听 → 优雅停机。
 
 pub mod data_loader;
+pub mod quality;
 pub mod routes;
 pub mod state;
 pub mod udf;

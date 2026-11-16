@@ -103,6 +103,17 @@ pub struct KlinesQuery {
     pub after: Option<i64>,
 }
 
+/// `/api/quality` 查询参数。
+#[derive(Debug, Deserialize)]
+pub struct QualityQuery {
+    /// 市场类型（缺省为 `futures`）。
+    pub market_type: Option<String>,
+    /// 交易对。
+    pub pair: String,
+    /// 周期。
+    pub timeframe: String,
+}
+
 /// `/api/drawings` 查询参数。
 #[derive(Debug, Deserialize)]
 pub struct DrawingsQuery {
@@ -302,6 +313,42 @@ async fn klines_handler(
         ),
         Ok(Err(e)) => handle_data_error(e),
         Err(e) => handle_data_error(DataError::Task(format!("kline load task: {e}"))),
+    }
+}
+
+/// `/api/quality`：数据质量报告。
+#[tracing::instrument(skip_all, fields(pair = %query.pair, timeframe = %query.timeframe))]
+async fn quality_handler(
+    State(state): State<AppState>,
+    Query(query): Query<QualityQuery>,
+) -> impl IntoResponse {
+    let market_type = match require_market_type(query.market_type.as_deref()) {
+        Ok(mt) => mt,
+        Err(resp) => return resp,
+    };
+
+    if !valid_pair(&query.pair) {
+        return bad_request("invalid pair");
+    }
+    if !valid_timeframe(&query.timeframe) {
+        return bad_request("invalid timeframe");
+    }
+
+    let joined = tokio::task::spawn_blocking({
+        let loader = state.data_loader.clone();
+        let pair = query.pair.clone();
+        let timeframe = query.timeframe.clone();
+        move || loader.quality_report(market_type, &pair, &timeframe)
+    })
+    .await;
+
+    match joined {
+        Ok(Ok(report)) => (
+            StatusCode::OK,
+            Json(ApiResponse::ok(serde_json::json!(report))),
+        ),
+        Ok(Err(e)) => handle_data_error(e),
+        Err(e) => handle_data_error(DataError::Task(format!("quality report task: {e}"))),
     }
 }
 
@@ -543,6 +590,7 @@ pub fn create_router(app_state: AppState) -> Router {
         .route("/api/pairs", axum::routing::get(pairs_handler))
         .route("/api/timeframes", axum::routing::get(timeframes_handler))
         .route("/api/klines", axum::routing::get(klines_handler))
+        .route("/api/quality", axum::routing::get(quality_handler))
         .route(
             "/api/layouts",
             axum::routing::get(list_layouts_handler).post(create_layout_handler),
@@ -663,6 +711,60 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_quality_rejects_invalid_params() {
+        let app = test_app();
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/quality?market_type=futures&pair=..%2Fetc&timeframe=1h")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/quality?market_type=futures&pair=BTCUSDT&timeframe=%2Fetc")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/quality?market_type=unknown&pair=BTCUSDT&timeframe=1h")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_quality_returns_not_found_without_data() {
+        let app = test_app();
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/quality?market_type=futures&pair=BTCUSDT&timeframe=1h")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

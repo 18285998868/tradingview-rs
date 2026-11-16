@@ -93,7 +93,7 @@ frontend/           # 前端工程：src/{api,app,chart,indicators,main,types} +
 
 ### routes & data_loader
 
-- `GET /api/health` 健康检查；`/api/market-types|pairs|timeframes|klines` 按 `market_type` + `pair` + `timeframe` 取数。
+- `GET /api/health` 健康检查；`/api/market-types|pairs|timeframes|klines|quality` 按 `market_type` + `pair` + `timeframe` 取数或统计。
 - **`/api/market-types` 只列"本地确有数据源"的类型**：`futures`（binance um）+ `dukascopy`（外汇/贵金属）。`spot` 变体仍可解析但无本地数据，不对外暴露 —— 否则前端会列出"选了就是空图"的选项。
 - 入参做目录穿越防护（`..`/`/etc/passwd` 类输入有单测覆盖），并限长（pair ≤ 32、timeframe ≤ 16）。
 - 请求规模防护：`limit` ≤ 10000，超限返回 400。
@@ -106,12 +106,13 @@ frontend/           # 前端工程：src/{api,app,chart,indicators,main,types} +
 - 目录扫描（`list_pairs` / `list_timeframes`）另有一级 60 秒 TTL 缓存，键分别是市场、市场 + 交易对；否则 `/api/pairs`、`/udf/search`、`/udf/symbols` 每次请求都要递归 `read_dir` 并逐个品种探测数据文件。
 - 响应压缩：客户端带 `Accept-Encoding: gzip` 时由 tower-http 压缩（`Fastest` 级别，只压 >32 字节且非图片/SSE/gRPC 的响应）。实测 1m 全量 4.3 MB → 1.3 MB，release 下多花约 5–10 ms CPU；没有用默认压缩级别，因为本地回环带宽不是瓶颈，默认级别的 CPU 开销换不回相应的传输收益。
 - 时间过滤用二分（`partition_point`）定位窗口，只拷贝窗口内的 bar；`limit` 取窗口内**最后** N 根。
+- `GET /api/quality` 复用同一份缓存列集，输出 bar 数、首尾时间、按周期步长推算的应有 bar 数/缺失数/覆盖率、缺口段数与明细（最多 20 条）、零/负成交量、OHLC 包络异常、非正价格，以及清洗阶段丢弃的重复时间戳/非有限值行数。缺口按数据源周期步长计算，binance `1mo` 按自然月；报告只读缓存，不写状态库，也不改变前端。
 
 ### 并发模型（阻塞 IO 不占 worker）
 
 tokio 的 worker 线程只做调度。读 zip（实测 52ms）这类同步重活必须挪到 blocking 线程池，否则并发几个请求就能占满 12 个 worker，轻请求（`/api/health`）也一起卡死。
 
-- `/api/pairs`、`/api/timeframes`、`/api/klines`：`spawn_blocking` 包裹数据层调用。
+- `/api/pairs`、`/api/timeframes`、`/api/klines`、`/api/quality`：`spawn_blocking` 包裹数据层调用。
 - `/api/layouts|drawings|preferences`：所有 SQLite 操作同样走 `spawn_blocking`；连接由 `Mutex<Connection>` 串行化（本地单用户，写少读多）。
 - blocking 线程里的 panic 会被 tokio 捕获成 `JoinError`，统一收敛成 500，不会变成进程级故障。
 
