@@ -320,5 +320,5 @@ API 说明见 `./backtest.md`。复跑性能项时需确认：
 - 单组 1m 请求覆盖 2017-08-17 起的全部归档；
 - 100 组扫描为 `fast=5..14 × slow=20..29`；
 - 并发压测只打只读接口，持续 600 秒，5 个 keep-alive 连接；
-- 浏览器用 headless Firefox + geckodriver，窗口 1366×854，读取页面内
+- 浏览器用 headless Firefox + geckodriver，窗口 1366×854（内视口 1366×768），读取页面内
   `tv:first-screen` 与 `tv:tf-switch:*` 条目。
