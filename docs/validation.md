@@ -31,12 +31,12 @@
   `tradingview-rs:local` 1.31 GB；容器内 uid 10001，只读根文件系统。
 - 数据：Binance 现货 BTCUSDT，1m 全量 4,852,639 根（2017-08-17 至 2026-11-14，
   130 个归档），1h 原生 54,341 根；AC-V05 另取 U 本位永续 BTCUSDT 1h 400 根。
-- 数据层：AC-D01/D02/D05/D07 用 BTCUSDT 月档；AC-D03 用 BTCUSDT/ETHUSDT
-  2024-01 至 2024-03 的 12 个归档；AC-D04 用脚本生成的异常归档；AC-D06 按
-  24 小时成交额取前 100 个 USDT 现货标的，下载 12 周期月档到空目录。下载器
-  并发 64，`data.binance.vision` 直连，起始日解析所需的 `api.binance.com`
-  走本机 HTTP 代理。读取器 `binance-core 0.2.0`（data-reader `a844ea0`），
-  下载器 data-downloader `f852202`。
+- 数据层：AC-D01 用 BTCUSDT/ETHUSDT/SOLUSDT 月档，AC-D02/D05/D07 用 BTCUSDT
+  月档；AC-D03 用 BTCUSDT/ETHUSDT 2024-01 至 2024-03 的 12 个归档；AC-D04 用
+  脚本生成的异常归档；AC-D06 按 24 小时成交额取前 100 个 USDT 现货标的，下载
+  12 周期月档到空目录。下载器并发 64，`data.binance.vision` 直连，起始日解析
+  所需的 `api.binance.com` 走本机 HTTP 代理。读取器 `binance-core 0.2.0`
+  （data-reader `a844ea0`），下载器 data-downloader `f852202`。
 - 计时：性能项取 10 次或 5 次的 P95/中位数；浏览器耗时取自页面内的
   `performance.mark/measure`，在 `setData`、应用首屏视窗并等两帧后记录。
 - 缓存：性能与浏览器测试都在同一台机器上连续运行，操作系统的页缓存是热的；
