@@ -20,7 +20,8 @@
 
 ### Added
 
-- `GET /api/quality?market_type=&pair=&timeframe=`：基于现有 `DataLoader` 缓存列集输出数据质量报告，含 bar 数/首尾时间、按周期步长推算的应有 bar 数与覆盖率、缺口段数/最长缺口/最多 20 条缺口明细、零/负成交量、OHLC 包络异常、非正价格，以及清洗阶段丢弃的重复时间戳/非有限值行数；`1mo` 按自然月计算缺口，报告不写状态库、不改前端。
+- `GET /api/quality?market_type=&pair=&timeframe=`：基于现有 `DataLoader` 缓存列集输出数据质量报告，含 bar 数/首尾时间、按周期步长推算的应有 bar 数与覆盖率、缺口段数/最长缺口/最多 20 条缺口明细、零/负成交量、OHLC 包络异常、非正价格，以及清洗阶段丢弃的重复时间戳/非有限值行数；`1mo` 按自然月计算缺口，报告不写状态库。
+- 前端信息栏数据质量徽标：`frontend/src/quality.ts` 把报告压成覆盖率 + 缺口/零量/异常文本，覆盖率与异常决定绿/黄/红三档，零成交单独出现不降级；`loadQuality` 在整段 K 线加载后异步拉取，`invalidateQualityBadge` 在切换交易对/市场/周期时递增序号并立即隐藏旧徽标，过期响应直接丢弃。
 - `KlineColumns::clean_stats`：记录 `from_parts` 丢弃的非有限值行与重复时间戳行；切片视图不携带该统计。
 - `tests/udf_contract_test.rs`：锁定 `/udf/config`、`/udf/symbols`、`/udf/search`、`/udf/history` 的 JSON 契约与官方语义（`to` 右开、`countback` 优先、`nextTime`、`pricescale` 采样、周线能力）。
 - `STEP.md` 与 `STEP.d/`：拆分范围、协议修复清单与官方语义依据。

@@ -54,6 +54,32 @@ html, body, #app {
   white-space: nowrap;
 }
 
+.toolbar .quality-badge {
+  font-size: 11px;
+  padding: 2px 7px;
+  border: 1px solid #45475a;
+  border-radius: 999px;
+  background: #1e1e2e;
+  color: #a6adc8;
+  white-space: nowrap;
+  cursor: help;
+}
+
+.toolbar .quality-badge.good {
+  color: #a6e3a1;
+  border-color: #40a02b;
+}
+
+.toolbar .quality-badge.warn {
+  color: #f9e2af;
+  border-color: #df8e1d;
+}
+
+.toolbar .quality-badge.bad {
+  color: #f38ba8;
+  border-color: #d20f39;
+}
+
 .toolbar .app-version {
   font-size: 10px;
   color: #45475a;

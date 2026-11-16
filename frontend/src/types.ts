@@ -36,6 +36,34 @@ export interface KlinesData {
   klines: Kline[];
 }
 
+export interface QualityGap {
+  after: number;
+  before: number;
+  missing_bars: number;
+}
+
+export interface QualityReport {
+  market_type: string;
+  pair: string;
+  timeframe: string;
+  bar_count: number;
+  first_time: number | null;
+  last_time: number | null;
+  expected_bars: number;
+  missing_bars: number;
+  coverage: number;
+  gap_count: number;
+  longest_gap_bars: number;
+  gaps: QualityGap[];
+  gaps_truncated: boolean;
+  zero_volume_bars: number;
+  negative_volume_bars: number;
+  bad_ohlc_bars: number;
+  non_positive_price_bars: number;
+  duplicate_rows: number;
+  non_finite_rows: number;
+}
+
 export interface StrategyMarker {
   time: number;
   side: string;

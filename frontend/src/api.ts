@@ -1,4 +1,4 @@
-import type { ApiResponse, KlinesData, MarketTypesData, PairsData, StrategyResult, TimeframesData } from './types';
+import type { ApiResponse, KlinesData, MarketTypesData, PairsData, QualityReport, StrategyResult, TimeframesData } from './types';
 
 const BASE = '/api';
 
@@ -65,6 +65,19 @@ export async function fetchKlines(params: KlinesParams): Promise<KlinesData> {
   if (params.before !== undefined) url += `&before=${params.before}`;
   if (params.after !== undefined) url += `&after=${params.after}`;
   const json = await fetchJson<ApiResponse<KlinesData>>(url);
+  if (!json.success || !json.data) throw new Error(json.error ?? 'unknown error');
+  return json.data;
+}
+
+export interface QualityParams {
+  marketType: string;
+  pair: string;
+  timeframe: string;
+}
+
+export async function fetchQuality(params: QualityParams): Promise<QualityReport> {
+  const url = `${BASE}/quality?market_type=${params.marketType}&pair=${params.pair}&timeframe=${params.timeframe}`;
+  const json = await fetchJson<ApiResponse<QualityReport>>(url);
   if (!json.success || !json.data) throw new Error(json.error ?? 'unknown error');
   return json.data;
 }

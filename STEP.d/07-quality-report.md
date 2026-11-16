@@ -2,7 +2,7 @@
 
 ## 目标
 
-为本地行情归档提供一个只读诊断端点：不打开图表也能知道某交易对/周期的时间范围、bar 数、缺口、零成交和 OHLC 异常。复用现有 `DataLoader` 缓存，不新增依赖，不改 SQLite schema 与前端。
+为本地行情归档提供一个只读诊断端点：不打开图表也能知道某交易对/周期的时间范围、bar 数、缺口、零成交和 OHLC 异常。复用现有 `DataLoader` 缓存，不新增依赖，不改 SQLite schema；前端只新增一个只读徽标，见下文。
 
 ## 接口
 
@@ -54,10 +54,19 @@ binance reader 默认 `BadRowPolicy::Fail`，会直接拒绝重复时间戳、�
 - `src/app/routes.rs`：`QualityQuery` 与 `quality_handler`，读盘走 `spawn_blocking`，错误映射沿用 `handle_data_error`（400 / 404 / 500）。
 - 报告是整段列集的统计；数据量大时和 `/api/klines` 全量请求一样会占用缓存，不额外复制列集。
 
+## 前端徽标
+
+- `frontend/src/quality.ts` 的 `qualityBadge()` 是纯函数：覆盖率与异常决定等级，零成交单独出现不降级；`formatQualityPercent()` 负责百分比格式（最多两位小数、去尾零）。
+- 信息栏 `#quality-badge` 默认 `hidden`；`loadQuality()` 在整段 K 线加载完成后异步拉取，`invalidateQualityBadge()` 递增 `qualitySeq` 并清空文本/提示，供 `teardownChart`、全量加载分支与三个切换入口复用。
+- 过期保护有两层：序号不匹配直接丢弃响应，另外再比对 `market_type` / `pair` / `timeframe` 与当前选择一致。
+- 徽标反映整段归档，不受 200 根分页窗口影响；后端返回的清洗计数对当前数据源通常是 0，接到数据源放宽校验后会直接显示出来。
+- 测试：`frontend/scripts/quality.test.mjs` 覆盖绿/黄/红阈值、零成交不降级、百分比格式，`cd frontend && npm test` 运行。
+
 ## 验证
 
 - `quality.rs` 单测：固定步长相邻/缺口/非整倍间隔、自然月跨 2 月、缺口与异常统计、清洗计数与缺口明细上限。
 - `data_loader.rs` 单测：`from_parts` 的 NaN/重复计数。
 - `tests/integration_test.rs`：真实 zip fixture 的 `quality_report` 字段、非法周期 400。
 - `routes.rs` 单测：非法 pair/timeframe/market_type 400，无数据 404。
+- 前端：`npm test` 覆盖徽标纯函数；`tsc --noEmit` 与 `vite build` 通过后，用 geckodriver + headless Firefox 冒烟，校验徽标文本、`title` 与切换标的后旧徽标立即消失。
 - 发布前在远程执行完整 cargo 门禁，并用真实数据冒烟 `futures/BTCUSDT/1h` 与 `dukascopy/EURUSD/H1`。

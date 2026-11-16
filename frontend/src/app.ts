@@ -8,6 +8,7 @@ import {
   fetchMarketTypes,
   fetchPairs,
   fetchPreferences,
+  fetchQuality,
   fetchStrategies,
   fetchStrategy,
   fetchTimeframes,
@@ -25,6 +26,7 @@ import {
   type Viewport,
 } from './chart';
 import { findIndicator, getAllIndicators, type ActiveIndicator, type IndicatorDef } from './indicators';
+import { qualityBadge } from './quality';
 import type { Kline, StrategyResult } from './types';
 
 const PAGE_SIZE = 200;
@@ -103,6 +105,8 @@ export class App {
   private strategyPanelName: HTMLElement;
   private strategyPanelBody: HTMLElement;
   private infoEl: HTMLElement;
+  private qualityBadgeEl: HTMLElement;
+  private qualitySeq = 0;
   private chartContainer: HTMLElement;
   private indicatorsEl: HTMLElement;
   private layoutSelect: HTMLSelectElement;
@@ -209,6 +213,7 @@ export class App {
         <button id="drawing-redo" class="time-jump-btn">重做</button>
         <button id="drawing-clear" class="time-jump-btn">清空</button>
         <span class="info" id="info"></span>
+        <span class="quality-badge" id="quality-badge" hidden></span>
         <span class="app-version" id="app-version"></span>
       </div>
       <div class="chart-container" id="chart-container">
@@ -228,6 +233,7 @@ export class App {
     this.strategyPanelName = container.querySelector('#strategy-panel-name')!;
     this.strategyPanelBody = container.querySelector('#strategy-panel-body')!;
     this.infoEl = container.querySelector('#info')!;
+    this.qualityBadgeEl = container.querySelector('#quality-badge')!;
     this.chartContainer = container.querySelector('#chart-container')!;
     this.indicatorsEl = container.querySelector('#active-indicators') as HTMLElement;
     this.layoutSelect = container.querySelector('#layout-select') as HTMLSelectElement;
@@ -427,6 +433,43 @@ export class App {
       : '';
     const suffix = r.index >= this.allKlines.length - 1 ? ' · 已到末尾' : '';
     return `回放 ${r.index + 1}/${this.allKlines.length}${dt ? ` · ${dt}` : ''}${suffix}`;
+  }
+
+  /** 让当前徽标失效：递增序号丢弃飞行中的响应，并立即隐藏旧报告。 */
+  private invalidateQualityBadge(): void {
+    this.qualitySeq += 1;
+    this.qualityBadgeEl.hidden = true;
+    this.qualityBadgeEl.textContent = '';
+    this.qualityBadgeEl.title = '';
+  }
+
+  /**
+   * 拉取当前交易对/周期的数据质量报告。
+   *
+   * 后端按整段缓存统计，与图表当前只加载 200 根的窗口无关；切换交易对或
+   * 周期时用序号丢弃过期响应，避免旧报告覆盖新标的。
+   */
+  private async loadQuality(marketType: string, pair: string, timeframe: string): Promise<void> {
+    this.invalidateQualityBadge();
+    const seq = this.qualitySeq;
+    try {
+      const report = await fetchQuality({ marketType, pair, timeframe });
+      if (
+        seq !== this.qualitySeq ||
+        this.marketSelect.value !== marketType ||
+        this._pair !== pair ||
+        this._timeframe !== timeframe
+      ) {
+        return;
+      }
+      const view = qualityBadge(report);
+      this.qualityBadgeEl.textContent = view.text;
+      this.qualityBadgeEl.title = view.title;
+      this.qualityBadgeEl.className = `quality-badge ${view.level}`;
+      this.qualityBadgeEl.hidden = false;
+    } catch {
+      if (seq === this.qualitySeq) this.qualityBadgeEl.hidden = true;
+    }
   }
 
   private updateReplayUi(): void {
@@ -843,6 +886,7 @@ export class App {
 
   private teardownChart(placeholder: string): void {
     this.disposeReplay();
+    this.invalidateQualityBadge();
     this.drawingLoadToken += 1;
     this.drawingsLoaded = false;
     if (this.saveTimer !== null) {
@@ -934,6 +978,7 @@ export class App {
   private async selectPair(pair: string): Promise<void> {
     this.pairDropdown.classList.remove('visible');
     if (pair === this._pair && this._timeframe) return;
+    this.invalidateQualityBadge();
     await this.flushPendingSaves();
     this._pair = pair;
     this.pairSearch.value = pair;
@@ -997,6 +1042,7 @@ export class App {
           this.refreshIndicators();
         }
       } else {
+        this.invalidateQualityBadge();
         this.chartContainer.innerHTML = '<div class="loading">加载中...</div>';
         klines = await fetchKlines({ marketType: this.marketSelect.value, pair: this._pair, timeframe: this._timeframe, limit: PAGE_SIZE });
         this.allKlines = klines.klines;
@@ -1006,6 +1052,7 @@ export class App {
         this.bindChart();
         this.chart.setData(klines.klines);
         this.refreshIndicators();
+        void this.loadQuality(this.marketSelect.value, this._pair, this._timeframe);
       }
       this.infoEl.textContent = this.dataInfoText();
       if (!dir) this.scheduleSave();
@@ -1251,6 +1298,7 @@ export class App {
   }
 
   private async onMarketChange(): Promise<void> {
+    this.invalidateQualityBadge();
     await this.flushPendingSaves();
     this._pair = '';
     this._timeframe = '';
@@ -1268,6 +1316,7 @@ export class App {
   }
 
   private async onTimeframeChange(): Promise<void> {
+    this.invalidateQualityBadge();
     await this.flushPendingSaves();
     this._timeframe = this.timeframeSelect.value;
     this.activeIndicators = [];

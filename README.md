@@ -106,7 +106,7 @@ frontend/           # 前端工程：src/{api,app,chart,indicators,main,types} +
 - 目录扫描（`list_pairs` / `list_timeframes`）另有一级 60 秒 TTL 缓存，键分别是市场、市场 + 交易对；否则 `/api/pairs`、`/udf/search`、`/udf/symbols` 每次请求都要递归 `read_dir` 并逐个品种探测数据文件。
 - 响应压缩：客户端带 `Accept-Encoding: gzip` 时由 tower-http 压缩（`Fastest` 级别，只压 >32 字节且非图片/SSE/gRPC 的响应）。实测 1m 全量 4.3 MB → 1.3 MB，release 下多花约 5–10 ms CPU；没有用默认压缩级别，因为本地回环带宽不是瓶颈，默认级别的 CPU 开销换不回相应的传输收益。
 - 时间过滤用二分（`partition_point`）定位窗口，只拷贝窗口内的 bar；`limit` 取窗口内**最后** N 根。
-- `GET /api/quality` 复用同一份缓存列集，输出 bar 数、首尾时间、按周期步长推算的应有 bar 数/缺失数/覆盖率、缺口段数与明细（最多 20 条）、零/负成交量、OHLC 包络异常、非正价格，以及清洗阶段丢弃的重复时间戳/非有限值行数。缺口按数据源周期步长计算，binance `1mo` 按自然月；报告只读缓存，不写状态库，也不改变前端。
+- `GET /api/quality` 复用同一份缓存列集，输出 bar 数、首尾时间、按周期步长推算的应有 bar 数/缺失数/覆盖率、缺口段数与明细（最多 20 条）、零/负成交量、OHLC 包络异常、非正价格，以及清洗阶段丢弃的重复时间戳/非有限值行数。缺口按数据源周期步长计算，binance `1mo` 按自然月；报告只读缓存，不写状态库。
 
 ### 并发模型（阻塞 IO 不占 worker）
 
@@ -132,6 +132,14 @@ tokio 的 worker 线程只做调度。读 zip（实测 52ms）这类同步重活
 - 修正了对齐偏差：PSAR、Ichimoku、Chandelier、ADX、MFI、KST、TRIX、OBV、AO，以及 MACD/Stoch 的暖机段。
 - Ichimoku 改为自实现：转换线/基准线画在当前 bar，先行 A/B 右移 `displacement` 根；不再直接采用库的“四线同起点”输出。
 - 回归测试：`cd frontend && npm test`。覆盖首有效下标、无 `undefined`、暖机后无空洞、MACD 三线同轴、Ichimoku 位移、振荡指标值域，以及“完整序列 vs 回放前缀”在重叠区间逐点一致；另有图表增量判定的纯函数测试（尾部扩展、最后一根改写、乱序回退、指标前缀兼容）。
+
+### 数据质量徽标
+
+- 信息栏徽标由 `/api/quality` 驱动：一段 K 线加载完成后异步拉取，不阻塞图表；报告按整段归档统计，与图表当前只加载的 200 根窗口无关。
+- 等级只看覆盖率与异常：覆盖率 ≥ 99.9% 且无缺口、无异常为绿色；有缺口或覆盖率 < 99.9% 为黄色；覆盖率 < 99% 或任一 OHLC / 价格 / 成交量 / 清洗异常为红色。零成交量是业务信号（例如外汇周末），单独出现仍保持绿色。
+- 徽标文本形如 `质量 99.9% · 缺口 1根`，悬停提示给出 bar 数/应有 bar 数、缺口段数与最长缺口、零/负成交量、OHLC 与清洗计数。
+- 切换交易对、市场或周期时先递增请求序号并立即隐藏旧徽标，飞行中的旧响应按序号丢弃，避免旧报告贴到新标的上。
+- 纯函数在 `frontend/src/quality.ts`，测试在 `frontend/scripts/quality.test.mjs`（`cd frontend && npm test`）。
 
 ### UDF 数据源
 
