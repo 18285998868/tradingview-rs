@@ -20,6 +20,7 @@ import { DrawingManager, type DrawingKind } from 'lightweight-charts-drawing';
 import type { Kline, StrategyMarker, StrategyOverlay } from './types';
 import type { ActiveIndicator, SubSeries } from './indicators';
 import { safeCalc } from './indicators';
+import { isTailExtension, tailValuesCompatible } from './incremental';
 
 const BUFFER = 30;
 const INITIAL_VISIBLE_BARS = 50;
@@ -121,7 +122,18 @@ export function createChartManager(
   const subPaneMeta: SubPaneMeta[] = [];
 
   let allKlines: Kline[] = [];
+  // 与 allKlines 一一对应；增量刷新时只改写尾部，避免整段重新 map。
+  let candleData: CandlestickData[] = [];
   let suppressEdgeCheck = false;
+
+  /** 上一次 applyIndicators 的输入与输出，用于尾部增量更新。 */
+  interface AppliedIndicators {
+    key: string;
+    klines: Kline[];
+    overlays: (number | null)[][];
+    subs: (number | null)[][];
+  }
+  let appliedIndicators: AppliedIndicators | null = null;
 
   // ---- viewport ----
   function getViewport(): Viewport | null {
@@ -170,14 +182,30 @@ export function createChartManager(
   const ro = new ResizeObserver(() => resize());
   ro.observe(wrapper);
 
-  function toCandle(klines: Kline[]): CandlestickData[] {
-    return klines.map((k) => ({
+  function toCandleAt(k: Kline): CandlestickData {
+    return {
       time: (k.time / 1000) as UTCTimestamp,
       open: k.open,
       high: k.high,
       low: k.low,
       close: k.close,
-    }));
+    };
+  }
+
+  function toCandle(klines: Kline[]): CandlestickData[] {
+    return klines.map(toCandleAt);
+  }
+
+  /** 把 `prev → next` 的尾部差异写到蜡烛序列，并同步缓存。 */
+  function updateCandles(prev: Kline[], next: Kline[]): void {
+    const from = Math.max(0, prev.length - 1);
+    for (let i = from; i < next.length; i++) {
+      const candle = toCandleAt(next[i]);
+      candleSeries.update(candle);
+      candleData[i] = candle;
+    }
+    candleData.length = next.length;
+    allKlines = next;
   }
 
   function clearOverlays() {
@@ -318,6 +346,40 @@ export function createChartManager(
     return s;
   }
 
+  /** 指标 id + 参数快照；变化时必须整段重算。 */
+  function indicatorKey(indicators: ActiveIndicator[]): string {
+    return indicators.map((a) => `${a.def.id}:${JSON.stringify(a.params)}`).join('|');
+  }
+
+  function updateLineTail(
+    series: ISeriesApi<'Line'>,
+    values: (number | null)[],
+    klines: Kline[],
+    from: number,
+  ): void {
+    for (let i = from; i < values.length && i < klines.length; i++) {
+      const v = values[i];
+      if (v !== null && v !== undefined && Number.isFinite(v)) {
+        series.update({ time: (klines[i].time / 1000) as UTCTimestamp, value: v });
+      }
+    }
+  }
+
+  function updateHistogramTail(
+    series: ISeriesApi<'Histogram'>,
+    values: (number | null)[],
+    klines: Kline[],
+    color: string,
+    from: number,
+  ): void {
+    for (let i = from; i < values.length && i < klines.length; i++) {
+      const v = values[i];
+      if (v !== null && v !== undefined && Number.isFinite(v)) {
+        series.update({ time: (klines[i].time / 1000) as UTCTimestamp, value: v, color });
+      }
+    }
+  }
+
   // ---- 绘图持久化 / 撤销栈 ----
   let drawingHistory: string[] = [drawings.exportJSON()];
   let drawingHistoryIndex = 0;
@@ -362,10 +424,12 @@ export function createChartManager(
       clearOverlays();
       clearSubPanes();
       allKlines = klines;
+      candleData = toCandle(klines);
+      appliedIndicators = null;
       strategyMarkers = [];
       strategyOverlays = [];
       clearStrategyOverlays();
-      candleSeries.setData(toCandle(klines));
+      candleSeries.setData(candleData);
       renderStrategyWindow();
       const len = klines.length;
       if (len > INITIAL_VISIBLE_BARS) {
@@ -376,8 +440,16 @@ export function createChartManager(
     },
 
     updateData(klines: Kline[], visibleBars = INITIAL_VISIBLE_BARS) {
-      allKlines = klines;
-      candleSeries.setData(toCandle(klines));
+      // 回放每前进一步都是"前缀不变 + 追加一根"：只 update 尾部，
+      // 缩回或跳转时才整段 setData。
+      if (isTailExtension(allKlines, klines)) {
+        updateCandles(allKlines, klines);
+      } else {
+        allKlines = klines;
+        candleData = toCandle(klines);
+        appliedIndicators = null;
+        candleSeries.setData(candleData);
+      }
       renderStrategyWindow();
       const len = klines.length;
       suppressEdgeCheck = true;
@@ -392,8 +464,11 @@ export function createChartManager(
     prependData(klines: Kline[]) {
       if (klines.length === 0) return;
       const savedRange = chart.timeScale().getVisibleLogicalRange();
+      // 蜡烛数据没有 prepend API，只能整段重写；但只需转换新增的前缀。
       allKlines = klines.concat(allKlines);
-      candleSeries.setData(toCandle(allKlines));
+      candleData = toCandle(klines).concat(candleData);
+      appliedIndicators = null;
+      candleSeries.setData(candleData);
       if (savedRange) {
         const shift = klines.length;
         suppressEdgeCheck = true;
@@ -406,8 +481,15 @@ export function createChartManager(
     appendData(klines: Kline[]) {
       if (klines.length === 0) return;
       const savedRange = chart.timeScale().getVisibleLogicalRange();
-      allKlines = allKlines.concat(klines);
-      candleSeries.setData(toCandle(allKlines));
+      const next = allKlines.concat(klines);
+      if (isTailExtension(allKlines, next)) {
+        updateCandles(allKlines, next);
+      } else {
+        allKlines = next;
+        candleData = toCandle(next);
+        appliedIndicators = null;
+        candleSeries.setData(candleData);
+      }
       if (savedRange) {
         suppressEdgeCheck = true;
         chart.timeScale().setVisibleLogicalRange(savedRange);
@@ -440,6 +522,11 @@ export function createChartManager(
     },
 
     applyIndicators(indicators: ActiveIndicator[], klines: Kline[]) {
+      const key = indicatorKey(indicators);
+      const prev = appliedIndicators;
+      // 同一份数据 + 同一组指标重复调用：没有需要重画的东西。
+      if (prev && prev.key === key && prev.klines === klines && allKlines === klines) return;
+
       const savedViewport = getViewport();
 
       allKlines = klines;
@@ -464,6 +551,8 @@ export function createChartManager(
       }
       const overlayDefs: OverlayDef[] = [];
       const subDefs: SubPaneDef[] = [];
+      // 子图序列按创建顺序拍平，方便和上一次的输出逐条对比。
+      const subFlat: SubSeriesDef[] = [];
 
       let ci = 0;
       results.forEach(({ result }, ri) => {
@@ -479,6 +568,7 @@ export function createChartManager(
             return { key: `${ri}:${pi}:${si}:${sub.label}:${color}`, def: sub, color };
           });
           subDefs.push({ key: `${ri}:${pi}`, series: subSeries });
+          subFlat.push(...subSeries);
         });
       });
 
@@ -494,6 +584,53 @@ export function createChartManager(
             paneDef.series.every((def, j) => def.key === meta.keys[j])
           );
         });
+
+      // 只追加/改写最后一根、且指标前缀值不变时，用 series.update() 写尾部，
+      // 不整段 setData（回放逐根前进走的就是这条路径）。
+      const prevLen = prev?.klines.length ?? 0;
+      const canTail =
+        overlaySame &&
+        subSame &&
+        prev !== null &&
+        prev.key === key &&
+        isTailExtension(prev.klines, klines) &&
+        prev.overlays.length === overlayDefs.length &&
+        prev.subs.length === subFlat.length &&
+        overlayDefs.every((def, i) =>
+          tailValuesCompatible(prev.overlays[i], def.values, prevLen),
+        ) &&
+        subFlat.every((def, i) => tailValuesCompatible(prev.subs[i], def.def.values, prevLen));
+
+      if (canTail) {
+        const from = Math.max(0, prevLen - 1);
+        overlayDefs.forEach((def, i) => {
+          updateLineTail(overlaySeries[i], def.values, klines, from);
+        });
+        subDefs.forEach((paneDef, i) => {
+          const meta = subPaneMeta[i];
+          paneDef.series.forEach((def, j) => {
+            const series = meta.series[j];
+            if (def.def.type === 'histogram') {
+              updateHistogramTail(
+                series as ISeriesApi<'Histogram'>,
+                def.def.values,
+                klines,
+                def.color,
+                from,
+              );
+            } else {
+              updateLineTail(series as ISeriesApi<'Line'>, def.def.values, klines, from);
+            }
+          });
+        });
+        appliedIndicators = {
+          key,
+          klines,
+          overlays: overlayDefs.map((def) => def.values),
+          subs: subFlat.map((def) => def.def.values),
+        };
+        return;
+      }
 
       let rebuilt = false;
       if (overlaySame) {
@@ -546,6 +683,13 @@ export function createChartManager(
         if (subDefs.length > 0) applyPaneStretch();
         rebuilt = true;
       }
+
+      appliedIndicators = {
+        key,
+        klines,
+        overlays: overlayDefs.map((def) => def.values),
+        subs: subFlat.map((def) => def.def.values),
+      };
 
       if (rebuilt) resize();
       setViewport(savedViewport);

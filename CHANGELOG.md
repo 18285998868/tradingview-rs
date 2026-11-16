@@ -14,6 +14,9 @@
 - `list_pairs` / `list_timeframes` 的目录扫描结果加 60 秒 TTL 缓存（交易对按市场、周期按市场 + 交易对），`/api/pairs`、`/api/timeframes`、`/udf/search`、`/udf/symbols` 不再每次都递归 `read_dir`；扫描失败不入缓存，`invalidate_cache` 同时清空 K 线与目录缓存。
 - 开启 gzip 响应压缩（`tower-http` 的 `compression-gzip`，`Fastest` 级别）：`/api/klines` 1m 全量 4.3 MB → 1.3 MB，release 下多花约 5–10 ms CPU；<32 字节与图片/SSE 响应不压。
 - 新增依赖：`async-compression`（`tower-http` 的压缩实现），`Cargo.lock` 随之更新；`flate2` 只作为 dev-dependency 用于测试解压。
+- 前端图表增量刷新：`updateData` / `appendData` 在“前缀不变、只追加或改写最后一根”时改用 `series.update()`，不再整段 `setData`；指标序列同样只更新尾部，回放逐根前进不再重建整条线。
+- `prependData` 仍整段 `setData`（lightweight-charts 没有 prepend API），但只转换新增的 K 线前缀。
+- 指标条 DOM 只在增删/换序时重建；回放每帧不再重写 `innerHTML`。
 
 ### Added
 
@@ -25,3 +28,5 @@
 - `STEP.d/04-catalog-cache.md`：目录扫描缓存的设计与验证。
 - `STEP.d/05-compression.md`：gzip 级别取舍与 ETag 决策。
 - `tests/http_compression_test.rs`：gzip 往返字节相等、小响应不压、`identity` 不压。
+- `src/incremental.ts` + `scripts/chart-incremental.test.mjs`：图表尾部增量判定的纯函数与测试（追加、最后一根改写、缩短/乱序回退、指标前缀兼容）。
+- `STEP.d/06-frontend-incremental.md`：前端增量更新范围与指标重算成本。

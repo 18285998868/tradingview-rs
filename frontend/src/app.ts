@@ -87,6 +87,8 @@ export class App {
   private replay: ReplayState | null = null;
   private preReplayViewport: Viewport | null = null;
   private activeIndicators: ActiveIndicator[] = [];
+  /** 已渲染的指标条 id 顺序；回放每帧都会刷新指标，但 DOM 只在增删时重建。 */
+  private renderedIndicators = '';
   private allPairs: string[] = [];
   private activeStrategyToml: string | null = null;
   private marketSelect: HTMLSelectElement;
@@ -1228,6 +1230,9 @@ export class App {
   }
 
   private renderActiveIndicators() {
+    const key = this.activeIndicators.map((a) => a.def.id).join('|');
+    if (key === this.renderedIndicators) return;
+    this.renderedIndicators = key;
     this.indicatorsEl.innerHTML = '';
     for (const active of this.activeIndicators) {
       const chip = document.createElement('span');

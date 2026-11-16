@@ -122,7 +122,7 @@ tokio 的 worker 线程只做调度。读 zip（实测 52ms）这类同步重活
 - 前端维护两份数据：`allKlines` 是本次回放加载的完整窗口（当前取数上限 2000 根，以进入回放时的最后一根为终点），图表只接收 `allKlines[0..=cursor]` 的前缀。这样指标的输入始终截止当前游标，不会提前看到未来 bar。
 - 进入回放时以**当前视口左端**为起点；若该时间落在窗口内，就从对应 bar 开始。重置回到同一游标，退出回放恢复完整窗口和进入前的视口。
 - 控件：播放/暂停、单步、0.5×/1×/2×/4×/8×、重置、退出。播放到最后一根自动暂停。
-- 图表层 `updateData()` 只替换可见前缀，指标/策略在结构不变时复用已有 series 与 pane（仅 `setData`），避免每根 bar 拆重建副图。
+- 图表层 `updateData()` / `appendData()` 在“前缀不变、只追加或改写最后一根”时走 `series.update()` 写尾部，不再整段 `setData`；`prependData()` 受 lightweight-charts 限制仍整段重绘，但只转换新增的前缀。指标/策略在结构不变时复用已有 series 与 pane，指标序列同样只更新尾部。
 - 回放游标属于临时交互状态，不写入 SQLite；`last_session` 仍只保存交易对/周期/指标/策略/视口。
 
 ### 指标 parity
@@ -130,7 +130,7 @@ tokio 的 worker 线程只做调度。读 zip（实测 52ms）这类同步重活
 - 26 个指标以 Pine/TradingView 的“首有效 bar + null 暖机”为口径；未暖机位置一律 `null`，不会画成 0。
 - 修正了对齐偏差：PSAR、Ichimoku、Chandelier、ADX、MFI、KST、TRIX、OBV、AO，以及 MACD/Stoch 的暖机段。
 - Ichimoku 改为自实现：转换线/基准线画在当前 bar，先行 A/B 右移 `displacement` 根；不再直接采用库的“四线同起点”输出。
-- 回归测试：`cd frontend && npm test`。覆盖首有效下标、无 `undefined`、暖机后无空洞、MACD 三线同轴、Ichimoku 位移、振荡指标值域，以及“完整序列 vs 回放前缀”在重叠区间逐点一致。
+- 回归测试：`cd frontend && npm test`。覆盖首有效下标、无 `undefined`、暖机后无空洞、MACD 三线同轴、Ichimoku 位移、振荡指标值域，以及“完整序列 vs 回放前缀”在重叠区间逐点一致；另有图表增量判定的纯函数测试（尾部扩展、最后一根改写、乱序回退、指标前缀兼容）。
 
 ### UDF 数据源
 
