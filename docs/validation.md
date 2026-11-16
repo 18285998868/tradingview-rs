@@ -1,7 +1,7 @@
 # 回测子系统验证报告
 
 2026-11-16 在基准机上对回测子系统做了四层验证：正确性对账、性能基准、
-浏览器指标、工具链与安全。本文只记录实际运行过的用例；未运行项与规格偏差
+浏览器指标、工具链与运维安全。本文只记录实际运行过的用例；未运行项与规格偏差
 在文末单列，不能把本文当作全部验收项的签字确认。
 
 ## 结论
@@ -9,9 +9,9 @@
 | 层 | 验收项 | 结果 | 关键数据 |
 |---|---|---|---|
 | 第一层 正确性 | AC-B01/B02/B03/B06/B07、AC-R01/R02/R04 | 通过 | 35 项 unittest 全绿；逐笔、权益、回撤事件与指标和独立实现一致 |
-| 第二层 性能 | AC-P01/P02/P03 | 通过 | 1m 全量单组中位 13.38 秒；100 组 164.74 秒；5 并发 P95 22.9 毫秒、0 错误 |
-| 第三层 浏览器 | AC-C01/V02/V03/V06 | 通过 | 对比 P95 94 毫秒；首屏冷 268 毫秒、热 258 毫秒；14 次同区间切换中位 93 毫秒；9,939 根 60.34 fps |
-| 第四层 工具链与安全 | AC-S01/S02 | 通过 | 依赖审计 0 漏洞；Bearer/Basic 认证与可配置请求体上限实测生效；23 个非法用例全部 4xx |
+| 第二层 性能 | AC-P01/P02/P03/P04 | 通过 | 1m 全量单组中位 13.38 秒；100 组 164.74 秒；5 并发 P95 22.9 毫秒、0 错误；压力回测峰值 RSS 1.587 GiB、磁盘 37.35 GiB |
+| 第三层 浏览器 | AC-C01/V02/V03/V04/V06/C07/V05 | 通过 | 对比 P95 94 毫秒；首屏冷 268 毫秒、热 258 毫秒；同区间切换中位 93 毫秒；9,939 根 60.34 fps；命名对比跨重启找回；26 个指标 16,800 点与接口快照一致 |
+| 第四层 工具链、安全与运维 | AC-S01/S02/P07 | 通过 | 依赖审计 0 漏洞；Bearer/Basic 与可配置上限生效；23 个非法用例 4xx；快照恢复后 9 张表行数一致、10 个回测详情一致 |
 
 第 3 层只测了 Firefox 160；第 4 层的 Docker Compose 不在本轮。
 逐项状态见“未覆盖与偏差”。
@@ -25,7 +25,7 @@
 - 前端：Firefox 160.0 + geckodriver 0.37.1，窗口 1366×854，`innerWidth/innerHeight`
   为 1366×768；页面由同一个 release 服务提供。
 - 数据：Binance 现货 BTCUSDT，1m 全量 4,852,639 根（2017-08-17 至 2026-11-14，
-  130 个归档），1h 原生 54,341 根。
+  130 个归档），1h 原生 54,341 根；AC-V05 另取 U 本位永续 BTCUSDT 1h 400 根。
 - 计时：性能项取 10 次或 5 次的 P95/中位数；浏览器耗时取自页面内的
   `performance.mark/measure`，在 `setData`、应用首屏视窗并等两帧后记录。
 - 缓存：性能与浏览器测试都在同一台机器上连续运行，操作系统的页缓存是热的；
@@ -126,10 +126,24 @@ compare 每次带 10 个运行 ID。
 - 服务进程峰值 RSS 175.9 MB。
 - 压测只读，不包含并发提交/运行回测；服务配置 `max_concurrent=1`。
 
-### AC-P04 资源上限（部分）
+### AC-P04 资源上限与告警
 
-- 已测：worker 峰值 RSS 约 1.73 GB，服务进程峰值 176 MB，均远低于 16 GB。
-- 未测：磁盘占用、超限告警。该项不能记为已验证。
+方法：`scripts/resource_watch.py` 每秒采样服务进程树 RSS，按间隔累计
+`/data/data`、状态库与回测输出目录的已分配磁盘；阈值 16 GiB / 500 GiB，
+超限写 WARN、汇总写 ERROR，并以退出码 2 结束。负载为 release 构建的 1m 全历史
+（4,852,639 根）单组回测。
+
+| 指标 | 峰值 | 阈值 | 结果 |
+|---|---|---|---|
+| 进程树 RSS（服务 + worker） | 1.587 GiB | 16 GiB | 通过 |
+| 已分配磁盘 | 37.35 GiB | 500 GiB | 通过 |
+
+- 运行 `ecc857c4-5dce-4f70-9f81-c65f74e04585` 成功，4,852,639 根、6,784 笔交易，
+  与 AC-P01 的单组结果一致；16 次 RSS 采样覆盖完整回测。
+- 磁盘以行情归档为主（约 35 GiB），状态库 170 MB，回测输出按运行分目录。
+- 告警演练：把阈值临时压到 0.01 GiB 后，脚本分别输出
+  `WARN memory limit exceeded` / `WARN disk limit exceeded` 与 `ERROR SUMMARY`，
+  退出码 2；默认阈值即 16 GiB / 500 GiB。
 
 ### 性能说明
 
@@ -224,12 +238,37 @@ compare 每次带 10 个运行 ID。
   全部一致，标记序列无剩余、无缺失。
 - 规格要求随机抽 20 笔；本次是全量核对，结论更强。
 
+### AC-C07 命名对比保存与找回
+
+- 新增 `backtest_comparisons` 表（`003_comparisons.sql`）与
+  `GET/POST /api/backtests/comparisons`、`DELETE /api/backtests/comparisons/{id}`；
+  名称 1 至 64 字符且唯一，保存 2 至 `max_compare_runs` 个已成功运行。
+- 接口演练 25 项断言全过：保存返回 201；同名、空名、65 字符、1 个 ID、重复 ID
+  均 400；不存在的运行 404；重启服务后按 ID 找回且 `run_ids` 顺序一致；删除一个
+  运行后 `missing_runs` 实时变为 1；删除命名对比返回 204 且列表清空。
+- 浏览器演练（Firefox 160，1366×854）：勾选 2 个运行、填名保存后列表立即出现；
+  重启服务并重新打开页面，点击列表项自动勾选并渲染 2 条曲线与 2 行指标表。
+- 限制：名称只做 trim 与长度校验，不做大小写折叠；删除运行不会级联删除命名
+  对比，读取时用 `missing_runs` 标出缺失。
+
+### AC-V05 前端指标与接口 JSON 快照
+
+- 输入固定为 `/api/klines` 的真实响应：U 本位永续 BTCUSDT 1h 400 根
+  （`1793174400000` 至 `1794610800000`）。
+- 26 个指标、42 条 series、16,800 个数值点在默认参数下与冻结快照
+  `frontend/scripts/fixtures/indicator-snapshot.json` 逐点 `deepEqual`，包括
+  null 暖机位；前端测试 29 项全绿。
+- 数值正确性另由 `indicators.parity.test.mjs` 覆盖：SMA/EMA/RSI/ATR/MACD/
+  Ichimoku 与独立参考公式逐点核对，其余指标校验 Pine 首有效 bar、值域与
+  “只用当前及历史 bar”的前缀不变性。
+- 快照由 `node scripts/generate-indicator-snapshot.mjs` 生成；改动指标实现时
+  必须显式重建快照并复核差异。
+
 ### 浏览器项未覆盖
 
-- AC-V05：前端指标与后端 JSON 的逐项快照本轮未做。
 - AC-V07：只测了 Firefox 160，没有 Chrome，也没有第二个 Firefox 大版本。
 
-## 第四层 工具链与安全
+## 第四层 工具链、安全与运维
 
 ### 依赖与代码检查
 
@@ -273,16 +312,26 @@ compare 每次带 10 个运行 ID。
 - 实测（上限 1 KiB）：512 B 的偏好请求 200，2 KiB 返回 413
   `length limit exceeded`；默认 2 MiB 配置下 3 MiB 请求仍为 413。
 
+### AC-P07 数据库快照恢复
+
+方法：`scripts/snapshot_restore_check.py` 用 SQLite 在线 backup API 生成快照，
+以副本在 3013 端口启动临时服务，抽样 100 条 1m 行情与最近 10 个成功运行详情，
+写入标记布局后停服，用快照覆盖数据库并重启复核。
+
+- 快照 170,516,480 字节，耗时 0.08 秒；来源库、快照与恢复库的
+  `pragma integrity_check` 均为 `ok`。
+- 恢复前后 9 张表行数完全一致：`backtest_runs` 117、`backtest_trades` 672,383、
+  `backtest_equity`/`backtest_underwater` 各 226,221、`backtest_drawdown_events`
+  1,067、`backtest_comparisons` 0、`drawings` 1、`preferences` 1、`layouts` 0。
+- 100 条 K 线 JSON 的规范化哈希一致；10 个运行的 ID 顺序与详情哈希一致。
+- 快照之后写入的标记布局在恢复后消失，证明恢复覆盖了旧库；两次启动都通过健康检查。
+
 ## 未覆盖与偏差
 
 | 项 | 状态 | 说明 |
 |---|---|---|
-| AC-P04 磁盘与告警 | 未验证 | 只测了内存峰值 |
-| AC-P05 Docker Compose | 缺口 | 仓库没有 Compose 文件，未做全新机器部署演练 |
-| AC-P07 快照恢复 | 未验证 | 未做数据库快照恢复演练 |
-| AC-V05 指标一致性 | 未验证 | 未做前端与后端 JSON 快照比对 |
-| AC-V07 浏览器兼容 | 部分 | 仅 Firefox 160，无 Chrome |
-| AC-C07 对比命名保存 | 未实现 | 已知 P1 限制 |
+| AC-P05 Docker Compose | 缺口 | 远程机器没有 docker/podman，安装需要 sudo 密码；仓库仍缺 Compose 文件 |
+| AC-V07 浏览器兼容 | 部分 | 仅 Firefox 160，无 Chrome，也没有第二个 Firefox 大版本 |
 | AC-D01/D02/D06 | 不在本轮 | 数据导入正确性与全量导入性能 |
 
 其他风险：
@@ -313,12 +362,24 @@ npm run build
 npm test
 ```
 
-性能与浏览器验证使用的是一次性脚本，未纳入仓库；接口、参数与计时口径见上文，
-API 说明见 `./backtest.md`。复跑性能项时需确认：
+资源告警与快照恢复可直接用仓库脚本复跑：
+
+```bash
+# AC-P04：采样服务进程树与磁盘，超限退出码 2
+python3 scripts/resource_watch.py --pid <服务 PID> \
+    --path /data/data --path <状态库> --path <回测输出目录>
+
+# AC-P07：在线快照 → 临时实例 → 覆盖恢复 → 复核
+python3 scripts/snapshot_restore_check.py \
+    --source-db <状态库> --work-dir /tmp/p07 --data-dir /data/data
+```
+
+性能与浏览器测量使用一次性脚本驱动（浏览器为 headless Firefox + geckodriver，
+窗口 1366×854）；接口、参数与计时口径见上文，API 说明见 `./backtest.md`。
+复跑性能项时需确认：
 
 - 用 release 构建，Python 解释器装有 vectorbt 1.2.0；
 - 单组 1m 请求覆盖 2017-08-17 起的全部归档；
 - 100 组扫描为 `fast=5..14 × slow=20..29`；
 - 并发压测只打只读接口，持续 600 秒，5 个 keep-alive 连接；
-- 浏览器用 headless Firefox + geckodriver，窗口 1366×854（内视口 1366×768），读取页面内
-  `tv:first-screen` 与 `tv:tf-switch:*` 条目。
+- 浏览器读取页面内 `tv:first-screen` 与 `tv:tf-switch:*` 条目。

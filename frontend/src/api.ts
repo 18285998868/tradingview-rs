@@ -9,6 +9,7 @@ import type {
   MarketTypesData,
   PairsData,
   QualityReport,
+  SavedComparison,
   SubmitOutcome,
   TimeframesData,
 } from './types';
@@ -161,6 +162,29 @@ export async function compareBacktests(ids: string[]): Promise<CompareResponse> 
 /** 对比 CSV 下载地址（2..=10 个运行 ID）。 */
 export function compareCsvUrl(ids: string[]): string {
   return `${BASE}/backtests/compare.csv?ids=${ids.map(encodeURIComponent).join(',')}`;
+}
+
+export async function fetchSavedComparisons(): Promise<SavedComparison[]> {
+  const json = await fetchJson<ApiResponse<{ comparisons: SavedComparison[] }>>(
+    `${BASE}/backtests/comparisons`,
+  );
+  if (!json.success || !json.data) throw new Error(json.error ?? 'unknown error');
+  return json.data.comparisons;
+}
+
+export async function saveComparison(name: string, ids: string[]): Promise<SavedComparison> {
+  const json = await requestJson<ApiResponse<SavedComparison>>(
+    `${BASE}/backtests/comparisons`,
+    jsonInit('POST', { name, ids }),
+  );
+  if (!json.success || !json.data) throw new Error(json.error ?? 'unknown error');
+  return json.data;
+}
+
+export async function deleteComparison(id: string): Promise<void> {
+  await requestJson<void>(`${BASE}/backtests/comparisons/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  });
 }
 
 // ---- 本地状态：命名布局 / 绘图 / 偏好 ----

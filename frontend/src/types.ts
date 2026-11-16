@@ -226,6 +226,16 @@ export interface CompareResponse {
   max_compare_runs: number;
 }
 
+/** 命名保存的对比。 */
+export interface SavedComparison {
+  id: string;
+  name: string;
+  run_ids: string[];
+  missing_runs: number;
+  created_at: number;
+  updated_at: number;
+}
+
 export interface BacktestConfigResponse {
   enabled: boolean;
   market_type?: string;

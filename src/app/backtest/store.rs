@@ -5,11 +5,12 @@
 
 use rusqlite::{OptionalExtension, Row, params};
 
-use crate::app::state::{StateResult, StateStore};
+use crate::app::state::{StateError, StateResult, StateStore, now_ms};
 
 use super::model::{
-    BacktestMetrics, BacktestPlan, BacktestRunDetail, BacktestRunSummary, BacktestTrade,
-    DrawdownEvent, DualMaParams, EquityPoint, RunStatus, StrategyMarker, UnderwaterPoint,
+    BacktestComparison, BacktestMetrics, BacktestPlan, BacktestRunDetail, BacktestRunSummary,
+    BacktestTrade, DrawdownEvent, DualMaParams, EquityPoint, RunStatus, StrategyMarker,
+    UnderwaterPoint,
 };
 
 const RUN_COLUMNS: &str = "id, batch_id, status, market_type, pair, timeframe, strategy, \
@@ -255,6 +256,93 @@ impl StateStore {
             out.push(row?.into_summary()?);
         }
         Ok(out)
+    }
+
+    /// 列出命名保存的对比；`missing_runs` 按当前运行表实时统计。
+    ///
+    /// # Errors
+    /// SQLite 或已存 JSON 损坏时返回 [`crate::app::state::StateError`]。
+    pub(crate) fn list_backtest_comparisons(&self) -> StateResult<Vec<BacktestComparison>> {
+        let conn = self.conn()?;
+        let mut existing = std::collections::HashSet::new();
+        {
+            let mut stmt = conn.prepare("SELECT id FROM backtest_runs")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            for row in rows {
+                existing.insert(row?);
+            }
+        }
+        let mut stmt = conn.prepare(
+            "SELECT id, name, run_ids, created_at, updated_at
+             FROM backtest_comparisons ORDER BY updated_at DESC, name ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, name, raw_ids, created_at, updated_at) = row?;
+            let run_ids: Vec<String> = serde_json::from_str(&raw_ids)?;
+            let missing_runs = run_ids.iter().filter(|id| !existing.contains(*id)).count();
+            out.push(BacktestComparison {
+                id,
+                name,
+                run_ids,
+                missing_runs,
+                created_at,
+                updated_at,
+            });
+        }
+        Ok(out)
+    }
+
+    /// 保存命名对比；名称重复返回 [`crate::app::state::StateError::Invalid`]。
+    ///
+    /// # Errors
+    /// SQLite 或 JSON 序列化失败时返回 [`crate::app::state::StateError`]。
+    pub(crate) fn create_backtest_comparison(
+        &self,
+        name: &str,
+        run_ids: &[String],
+    ) -> StateResult<BacktestComparison> {
+        let raw_ids = serde_json::to_string(run_ids)?;
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = now_ms();
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO backtest_comparisons (id, name, run_ids, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?4)",
+            params![id, name, raw_ids, now],
+        )
+        .map_err(map_comparison_constraint)?;
+        drop(conn);
+        Ok(BacktestComparison {
+            id,
+            name: name.to_owned(),
+            run_ids: run_ids.to_vec(),
+            missing_runs: 0,
+            created_at: now,
+            updated_at: now,
+        })
+    }
+
+    /// 删除命名对比；不存在返回 `false`。
+    ///
+    /// # Errors
+    /// SQLite 失败时返回 [`crate::app::state::StateError`]。
+    pub(crate) fn delete_backtest_comparison(&self, id: &str) -> StateResult<bool> {
+        let conn = self.conn()?;
+        let changed = conn.execute(
+            "DELETE FROM backtest_comparisons WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(changed > 0)
     }
 
     /// 标记运行开始。
@@ -554,6 +642,15 @@ fn markers_from_trades(trades: &[BacktestTrade]) -> Vec<StrategyMarker> {
         }
     }
     markers
+}
+
+fn map_comparison_constraint(e: rusqlite::Error) -> StateError {
+    if let rusqlite::Error::SqliteFailure(err, _) = &e
+        && err.code == rusqlite::ErrorCode::ConstraintViolation
+    {
+        return StateError::Invalid("comparison name already exists".into());
+    }
+    StateError::Sqlite(e)
 }
 
 /// 读取单条运行的水下曲线（对比用）。

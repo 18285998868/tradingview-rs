@@ -9,7 +9,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use serde::Deserialize;
 
@@ -17,7 +17,7 @@ use crate::app::routes::{ApiResponse, bad_request, handle_state_error, not_found
 
 use super::model::{
     BACKTEST_TIMEFRAMES, BacktestError, CompareRequest, CreateBacktestRequest, STRATEGY_DUAL_MA,
-    STRATEGY_VERSION, SubmitOutcome,
+    STRATEGY_VERSION, SaveComparisonRequest, SubmitOutcome,
 };
 
 /// 回测路由（状态类型为 [`crate::app::routes::AppState`]）。
@@ -25,6 +25,14 @@ pub(crate) fn router() -> Router<crate::app::routes::AppState> {
     Router::new()
         .route("/api/backtests/config", get(config_handler))
         .route("/api/backtests", get(list_handler).post(submit_handler))
+        .route(
+            "/api/backtests/comparisons",
+            get(list_comparisons_handler).post(save_comparison_handler),
+        )
+        .route(
+            "/api/backtests/comparisons/{id}",
+            delete(delete_comparison_handler),
+        )
         .route("/api/backtests/compare", post(compare_handler))
         .route("/api/backtests/compare.csv", get(compare_csv_handler))
         .route(
@@ -170,6 +178,54 @@ async fn list_handler(
         .clamp(1, LIST_LIMIT_MAX);
     match service.list(limit).await {
         Ok(runs) => (StatusCode::OK, Json(ApiResponse::ok(runs))).into_response(),
+        Err(error) => handle_backtest_error(error),
+    }
+}
+
+/// `GET /api/backtests/comparisons`：命名保存的对比列表。
+async fn list_comparisons_handler(State(state): State<crate::app::routes::AppState>) -> Response {
+    let Some(service) = state.backtest.clone() else {
+        return disabled_response();
+    };
+    match service.list_comparisons().await {
+        Ok(comparisons) => (
+            StatusCode::OK,
+            Json(ApiResponse::ok(
+                serde_json::json!({ "comparisons": comparisons }),
+            )),
+        )
+            .into_response(),
+        Err(error) => handle_backtest_error(error),
+    }
+}
+
+/// `POST /api/backtests/comparisons`：命名保存 2..=上限个成功运行。
+async fn save_comparison_handler(
+    State(state): State<crate::app::routes::AppState>,
+    Json(request): Json<SaveComparisonRequest>,
+) -> Response {
+    let Some(service) = state.backtest.clone() else {
+        return disabled_response();
+    };
+    match service.save_comparison(&request.name, &request.ids).await {
+        Ok(saved) => (StatusCode::CREATED, Json(ApiResponse::ok(saved))).into_response(),
+        Err(error) => handle_backtest_error(error),
+    }
+}
+
+/// `DELETE /api/backtests/comparisons/{id}`：删除命名对比。
+async fn delete_comparison_handler(
+    State(state): State<crate::app::routes::AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    let Some(service) = state.backtest.clone() else {
+        return disabled_response();
+    };
+    if !valid_run_id(&id) {
+        return bad_request("invalid comparison id").into_response();
+    }
+    match service.delete_comparison(&id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => handle_backtest_error(error),
     }
 }

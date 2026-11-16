@@ -427,6 +427,69 @@ html, body, #app {
 .bt-compare-actions { display: flex; gap: 8px; margin-bottom: 8px; }
 .bt-compare-actions .bt-primary { width: auto; flex: 1; }
 
+.bt-compare-save { display: flex; gap: 8px; margin-bottom: 8px; }
+
+.bt-compare-save input {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid #45475a;
+  border-radius: 5px;
+  background: #11111b;
+  color: #cdd6f4;
+  font-size: 11px;
+  outline: none;
+}
+
+.bt-compare-save input:focus { border-color: #89b4fa; }
+
+.bt-compare-save button,
+.bt-saved-del {
+  padding: 2px 8px;
+  border: 1px solid #45475a;
+  border-radius: 4px;
+  background: #313244;
+  color: #cdd6f4;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.bt-compare-save button:hover,
+.bt-saved-del:hover { border-color: #89b4fa; }
+
+.bt-compare-save button:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.bt-saved { margin-bottom: 8px; }
+
+.bt-saved-title { font-size: 11px; color: #a6adc8; margin-bottom: 4px; }
+
+.bt-saved-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  border-bottom: 1px solid #313244;
+}
+
+.bt-saved-load {
+  flex: 1;
+  min-width: 0;
+  padding: 2px 0;
+  border: none;
+  background: none;
+  color: #89b4fa;
+  font-size: 11px;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.bt-saved-load:hover { text-decoration: underline; }
+
+.bt-saved-meta { font-size: 10px; color: #585b70; white-space: nowrap; }
+
 .bt-warnings {
   margin: 0 0 8px;
   padding-left: 18px;

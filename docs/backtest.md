@@ -65,6 +65,9 @@ keep_equity = true
 | POST | `/api/backtests/{id}/retry` | 用原参数创建新运行 |
 | POST | `/api/backtests/compare` | 2 到 10 个运行对比 |
 | GET | `/api/backtests/compare.csv?ids=a,b` | 对比指标 CSV |
+| GET | `/api/backtests/comparisons` | 命名保存的对比列表（含 `missing_runs`） |
+| POST | `/api/backtests/comparisons` | 保存命名对比（名称 1–64 字符，2–上限个成功运行） |
+| DELETE | `/api/backtests/comparisons/{id}` | 删除命名对比 |
 
 提交示例：
 
@@ -108,6 +111,11 @@ queued -> running -> succeeded
 - `backtest_equity`：降采样权益（`keep_equity=false` 时跳过）；
 - `backtest_underwater`：降采样水下曲线，始终保留。
 
+`migrations/003_comparisons.sql` 增加一张表：
+
+- `backtest_comparisons`：命名对比的名称、运行 ID JSON 数组与时间戳；
+  名称唯一；运行删除后对比保留，读取时按当前运行表统计 `missing_runs`。
+
 曲线按 `max_curve_points` 做保端点降采样；指标、回撤事件与交易明细按
 `max_trades` 截断。`keep_equity=false` 只关闭权益曲线，回撤分析仍完整可用。
 
@@ -118,12 +126,15 @@ queued -> running -> succeeded
 - 以下元数据不一致时产生警告：标的/市场、周期、策略版本、请求/实际数据区间、成本配置。
 - 参数不同不警告，但每个运行的参数与运行 ID 必须展示。
 - CSV 一行一个运行，列包含参数、成本、数据区间与全部回撤指标。
+- 命名对比：名称 1–64 字符且唯一；只接受 2 至 `max_compare_runs` 个已成功运行；
+  找回时按保存顺序恢复勾选，运行缺失只提示 `missing_runs`，不会静默补位。
 
 ## 前端
 
 `frontend/src/backtest.ts` 提供抽屉面板：参数表单、参数扫描、运行列表轮询、
 详情、权益/水下 SVG、回撤事件、交易表、最多 10 个运行的对比、图例开关、
-CSV、日志、重试与删除。点击运行详情会把买卖点叠加到主图，可单独清除。
+命名对比的保存/找回/删除、CSV、日志、重试与删除。点击运行详情会把买卖点叠加
+到主图，可单独清除。
 
 ## 验证
 
@@ -160,8 +171,8 @@ cd frontend && npm test
 - 服务默认只监听回环；`auth_token` 启用后 `/api/*` 与 `/udf/*` 需要 Bearer 或
   Basic。未内置 TLS，公网部署需反向代理终止 TLS。
 - 请求体上限由 `max_body_bytes` 配置，默认 2 MiB，合法范围 1 KiB 至 64 MiB。
-- Docker Compose 部署与数据库快照恢复未提供/未演练。
+- Docker Compose 部署未提供，浏览器兼容只验证了 Firefox 160。
 - 参数扫描使用 fork 进程池；Python 3.14 在多线程进程中 fork 会告警，未来需要
   改 `spawn` 并共享行情表。
 - 首版没有策略插件机制；新增策略需要同时改 Rust 契约、Python worker 与前端表单。
-- 对比视图命名保存（P1）未实现。
+- 命名对比不跟随运行删除级联清理，运行缺失只体现在 `missing_runs`。

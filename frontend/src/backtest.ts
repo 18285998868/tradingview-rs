@@ -2,11 +2,14 @@ import {
   compareBacktests,
   compareCsvUrl,
   deleteBacktest,
+  deleteComparison,
   fetchBacktest,
   fetchBacktestConfig,
   fetchBacktestLog,
   fetchBacktests,
+  fetchSavedComparisons,
   retryBacktest,
+  saveComparison,
   submitBacktest,
 } from './api';
 import type {
@@ -16,6 +19,7 @@ import type {
   BacktestRunSummary,
   CompareResponse,
   RunStatus,
+  SavedComparison,
 } from './types';
 
 export interface BacktestContext {
@@ -186,6 +190,8 @@ export class BacktestPanel {
   private compare: CompareResponse | null = null;
   private selected = new Set<string>();
   private hiddenSeries = new Set<string>();
+  private saved: SavedComparison[] = [];
+  private compareName = '';
   private busy = false;
   private statusEl: HTMLElement;
   private runsEl: HTMLElement;
@@ -281,6 +287,7 @@ export class BacktestPanel {
 
     void this.loadConfig();
     void this.refreshRuns();
+    void this.refreshSaved();
     window.setInterval(() => {
       if (panel.classList.contains('visible') && !document.hidden) void this.refreshRuns();
     }, POLL_MS);
@@ -290,6 +297,7 @@ export class BacktestPanel {
     this.panel.classList.add('visible');
     this.syncContext();
     void this.refreshRuns();
+    void this.refreshSaved();
   }
 
   close(): void {
@@ -465,20 +473,102 @@ export class BacktestPanel {
     this.compareSection.hidden = false;
     const count = this.selected.size;
     const disabled = count < 2 ? 'disabled' : '';
-    const csvDisabled = count < 2 ? 'disabled' : '';
+    const savedRows = this.saved.length
+      ? this.saved
+          .map(
+            (item) => `<div class="bt-saved-item">
+              <button class="bt-saved-load" data-saved="${esc(item.id)}" title="找回并重新对比">${esc(item.name)}</button>
+              <span class="bt-saved-meta">${item.run_ids.length} 个运行${item.missing_runs ? ` · 缺失 ${item.missing_runs}` : ''} · ${new Date(item.updated_at).toISOString().slice(0, 10)}</span>
+              <button class="bt-saved-del" data-saved-del="${esc(item.id)}" title="删除命名对比">删除</button>
+            </div>`,
+          )
+          .join('')
+      : '<div class="bt-empty">暂无命名对比</div>';
     this.compareEl.innerHTML = `
       <div class="bt-compare-actions">
         <button id="bt-compare" class="bt-primary" ${disabled}>对比已选 ${count} 个</button>
-        <button id="bt-csv" ${csvDisabled}>导出 CSV</button>
+        <button id="bt-csv" ${disabled}>导出 CSV</button>
+      </div>
+      <div class="bt-compare-save">
+        <input id="bt-compare-name" maxlength="64" placeholder="对比名称" value="${esc(this.compareName)}" />
+        <button id="bt-save-compare" ${disabled}>保存对比</button>
+      </div>
+      <div class="bt-saved">
+        <div class="bt-saved-title">已保存对比</div>
+        ${savedRows}
       </div>
       <div id="bt-compare-body">${this.compare ? '' : '<div class="bt-empty">勾选 2-10 个运行后对比水下曲线与回撤指标</div>'}</div>
     `;
+    const nameInput = this.compareEl.querySelector<HTMLInputElement>('#bt-compare-name');
+    nameInput?.addEventListener('input', () => {
+      this.compareName = nameInput.value;
+    });
     this.compareEl.querySelector('#bt-compare')?.addEventListener('click', () => void this.runCompare());
     this.compareEl.querySelector('#bt-csv')?.addEventListener('click', () => {
       const ids = [...this.selected];
       if (ids.length >= 2) window.open(compareCsvUrl(ids), '_blank');
     });
+    this.compareEl.querySelector('#bt-save-compare')?.addEventListener('click', () => void this.saveCurrentComparison());
+    this.compareEl.querySelectorAll<HTMLButtonElement>('[data-saved]').forEach((button) => {
+      button.addEventListener('click', () => void this.loadComparison(button.dataset.saved!));
+    });
+    this.compareEl.querySelectorAll<HTMLButtonElement>('[data-saved-del]').forEach((button) => {
+      button.addEventListener('click', () => void this.removeComparison(button.dataset.savedDel!));
+    });
     if (this.compare) this.renderCompare();
+  }
+
+  private async refreshSaved(): Promise<void> {
+    try {
+      this.saved = await fetchSavedComparisons();
+      this.renderCompareActions();
+    } catch (error) {
+      this.statusEl.textContent = `读取命名对比失败: ${error}`;
+    }
+  }
+
+  private async saveCurrentComparison(): Promise<void> {
+    const ids = [...this.selected];
+    const name = this.compareName.trim();
+    if (ids.length < 2) {
+      this.statusEl.textContent = '至少选择 2 个运行';
+      return;
+    }
+    if (!name) {
+      this.statusEl.textContent = '请填写对比名称';
+      return;
+    }
+    try {
+      const saved = await saveComparison(name, ids);
+      this.compareName = '';
+      this.statusEl.textContent = `已保存对比「${saved.name}」`;
+      await this.refreshSaved();
+    } catch (error) {
+      this.statusEl.textContent = `保存对比失败: ${error}`;
+    }
+  }
+
+  private async loadComparison(id: string): Promise<void> {
+    const item = this.saved.find((entry) => entry.id === id);
+    if (!item) return;
+    const maxCompare = this.config.limits?.max_compare_runs ?? 10;
+    this.selected = new Set(item.run_ids.slice(0, maxCompare));
+    this.renderRuns();
+    this.statusEl.textContent = item.missing_runs
+      ? `已找回「${item.name}」，其中 ${item.missing_runs} 个运行已删除`
+      : `已找回对比「${item.name}」`;
+    if (item.missing_runs === 0 && this.selected.size >= 2) await this.runCompare();
+  }
+
+  private async removeComparison(id: string): Promise<void> {
+    if (!confirm('删除该命名对比？')) return;
+    try {
+      await deleteComparison(id);
+      this.statusEl.textContent = '命名对比已删除';
+      await this.refreshSaved();
+    } catch (error) {
+      this.statusEl.textContent = `删除命名对比失败: ${error}`;
+    }
   }
 
   private async runCompare(): Promise<void> {

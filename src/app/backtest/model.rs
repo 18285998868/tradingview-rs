@@ -520,6 +520,36 @@ pub struct CompareRequest {
     pub ids: Vec<String>,
 }
 
+/// 命名对比名称最大字符数。
+pub const MAX_COMPARISON_NAME_CHARS: usize = 64;
+
+/// 命名保存的对比摘要。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BacktestComparison {
+    /// 对比 ID。
+    pub id: String,
+    /// 名称，唯一。
+    pub name: String,
+    /// 运行 ID 列表，按保存顺序。
+    pub run_ids: Vec<String>,
+    /// 读取时已不存在的运行数；大于 0 时找回会缺曲线。
+    pub missing_runs: usize,
+    /// 创建时间（毫秒）。
+    pub created_at: i64,
+    /// 最后更新时间（毫秒）。
+    pub updated_at: i64,
+}
+
+/// 保存命名对比的请求。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SaveComparisonRequest {
+    /// 名称，1..=64 字符。
+    pub name: String,
+    /// 运行 ID 列表，2..=配置上限，必须存在且已成功。
+    pub ids: Vec<String>,
+}
+
 /// 对比警告。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompareWarning {

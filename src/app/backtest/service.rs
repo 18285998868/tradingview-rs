@@ -14,9 +14,9 @@ use crate::error::AppError;
 
 use super::compare::{build_compare, export_csv};
 use super::model::{
-    BacktestError, BacktestMetrics, BacktestRunDetail, BacktestRunSummary, BacktestTrade,
-    CompareResponse, CreateBacktestRequest, DrawdownEvent, DualMaParams, EquityPoint,
-    SubmitOutcome, UnderwaterPoint,
+    BacktestComparison, BacktestError, BacktestMetrics, BacktestRunDetail, BacktestRunSummary,
+    BacktestTrade, CompareResponse, CreateBacktestRequest, DrawdownEvent, DualMaParams,
+    EquityPoint, MAX_COMPARISON_NAME_CHARS, RunStatus, SubmitOutcome, UnderwaterPoint,
 };
 use super::store::{StoredBacktestResult, load_underwater};
 
@@ -183,6 +183,74 @@ impl BacktestService {
             .await
             .map_err(|error| BacktestError::Worker(format!("state task join failed: {error}")))??;
         Ok(runs)
+    }
+
+    /// 列出命名保存的对比。
+    ///
+    /// # Errors
+    /// 状态库失败时返回 [`BacktestError::State`]。
+    pub async fn list_comparisons(&self) -> Result<Vec<BacktestComparison>, BacktestError> {
+        let store = Arc::clone(&self.store);
+        let items = tokio::task::spawn_blocking(move || store.list_backtest_comparisons())
+            .await
+            .map_err(|error| BacktestError::Worker(format!("state task join failed: {error}")))??;
+        Ok(items)
+    }
+
+    /// 保存命名对比；名称、数量、运行存在性与成功状态都会校验。
+    ///
+    /// # Errors
+    /// 名称非法、运行不存在或未成功时返回 [`BacktestError::Invalid`] /
+    /// [`BacktestError::NotFound`]；状态库失败时返回 [`BacktestError::State`]。
+    pub async fn save_comparison(
+        &self,
+        name: &str,
+        ids: &[String],
+    ) -> Result<BacktestComparison, BacktestError> {
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > MAX_COMPARISON_NAME_CHARS {
+            return Err(BacktestError::Invalid(format!(
+                "comparison name must be 1..={MAX_COMPARISON_NAME_CHARS} characters"
+            )));
+        }
+        let ids = validate_compare_ids(ids, self.config.max_compare_runs)?;
+        let store = Arc::clone(&self.store);
+        let name = name.to_owned();
+        let saved = tokio::task::spawn_blocking(move || {
+            for id in &ids {
+                let run = store.get_backtest_run(id)?.ok_or(BacktestError::NotFound)?;
+                if run.status != RunStatus::Succeeded {
+                    return Err(BacktestError::Invalid(format!(
+                        "run {} is not succeeded (status={})",
+                        run.id,
+                        run.status.as_str()
+                    )));
+                }
+            }
+            let saved = store.create_backtest_comparison(&name, &ids)?;
+            Ok::<BacktestComparison, BacktestError>(saved)
+        })
+        .await
+        .map_err(|error| BacktestError::Worker(format!("state task join failed: {error}")))??;
+        Ok(saved)
+    }
+
+    /// 删除命名对比。
+    ///
+    /// # Errors
+    /// 对比不存在时返回 [`BacktestError::NotFound`]；状态库失败时返回
+    /// [`BacktestError::State`]。
+    pub async fn delete_comparison(&self, id: &str) -> Result<(), BacktestError> {
+        let store = Arc::clone(&self.store);
+        let id = id.to_owned();
+        let deleted = tokio::task::spawn_blocking(move || store.delete_backtest_comparison(&id))
+            .await
+            .map_err(|error| BacktestError::Worker(format!("state task join failed: {error}")))??;
+        if deleted {
+            Ok(())
+        } else {
+            Err(BacktestError::NotFound)
+        }
     }
 
     /// 运行详情。

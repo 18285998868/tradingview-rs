@@ -16,7 +16,8 @@ use tempfile::TempDir;
 use tower::ServiceExt;
 
 use tradingview_backend::app::backtest::model::{
-    BacktestRunDetail, BacktestRunSummary, CompareResponse, RunStatus, SubmitOutcome,
+    BacktestComparison, BacktestRunDetail, BacktestRunSummary, CompareResponse, RunStatus,
+    SubmitOutcome,
 };
 use tradingview_backend::app::backtest::service::BacktestService;
 use tradingview_backend::app::routes::{AppState, create_router};
@@ -372,6 +373,116 @@ async fn compare_rejects_too_many_and_duplicate_ids() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(parse::<Value>(&bytes).error.unwrap().contains("duplicate"));
+}
+
+#[tokio::test]
+async fn named_comparison_survives_restart_and_tracks_missing_runs() {
+    let harness = harness(FAKE_WORKER);
+    let mut body = request_body();
+    body["param_grid"] = json!({ "fast": [5, 10], "slow": [30] });
+    let (status, bytes) = call(&harness.app, "POST", "/api/backtests", Some(body)).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let outcome = parse::<SubmitOutcome>(&bytes).data.unwrap();
+    let mut ids = Vec::new();
+    for run in &outcome.runs {
+        ids.push(
+            wait_for(&harness.service, &run.id, RunStatus::Succeeded)
+                .await
+                .id,
+        );
+    }
+
+    let (status, bytes) = call(
+        &harness.app,
+        "POST",
+        "/api/backtests/comparisons",
+        Some(json!({ "name": "黄金对比", "ids": ids })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let saved = parse::<BacktestComparison>(&bytes).data.unwrap();
+    assert_eq!(saved.name, "黄金对比");
+    assert_eq!(saved.run_ids, ids);
+    assert_eq!(saved.missing_runs, 0);
+
+    // 同名保存被拒。
+    let (status, bytes) = call(
+        &harness.app,
+        "POST",
+        "/api/backtests/comparisons",
+        Some(json!({ "name": "黄金对比", "ids": ids })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        parse::<Value>(&bytes)
+            .error
+            .unwrap()
+            .contains("already exists")
+    );
+
+    // 模拟重启：用同一数据库文件新建 store 与服务，记录仍在。
+    let db_path = harness._dir.path().join("test.db");
+    let config = BacktestConfig {
+        enabled: true,
+        python_bin: harness._dir.path().join("python/fake_worker.py"),
+        worker_dir: harness._dir.path().join("python"),
+        output_dir: Some(harness._dir.path().join("backtests")),
+        timeout_secs: 20,
+        max_concurrent: 2,
+        max_compare_runs: 10,
+        max_grid_runs: 100,
+        max_curve_points: 100,
+        max_trades: 1_000,
+        keep_equity: true,
+    };
+    let reopened = BacktestService::new(
+        Arc::new(StateStore::open(&db_path).unwrap()),
+        &harness._dir.path().join("data"),
+        config,
+    )
+    .unwrap();
+    let persisted = reopened.list_comparisons().await.unwrap();
+    assert_eq!(persisted.len(), 1);
+    assert_eq!(persisted[0].id, saved.id);
+
+    // 删除一个运行后，列表实时标出缺失数。
+    let (status, _) = call(
+        &harness.app,
+        "DELETE",
+        &format!("/api/backtests/{}", ids[0]),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, bytes) = call(&harness.app, "GET", "/api/backtests/comparisons", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let list = parse::<Value>(&bytes).data.unwrap();
+    assert_eq!(list["comparisons"][0]["missing_runs"], 1);
+
+    // 删除命名对比后列表为空。
+    let (status, _) = call(
+        &harness.app,
+        "DELETE",
+        &format!("/api/backtests/comparisons/{}", saved.id),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, bytes) = call(&harness.app, "GET", "/api/backtests/comparisons", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        parse::<Value>(&bytes).data.unwrap()["comparisons"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
 }
 
 #[tokio::test]

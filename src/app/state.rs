@@ -17,6 +17,8 @@ use crate::utils::{valid_pair, valid_timeframe};
 const SCHEMA: &str = include_str!("../../migrations/001_init.sql");
 /// 回测表结构（幂等）。
 const BACKTEST_SCHEMA: &str = include_str!("../../migrations/002_backtest.sql");
+/// 命名对比表结构（幂等）。
+const COMPARISON_SCHEMA: &str = include_str!("../../migrations/003_comparisons.sql");
 
 /// 布局名称最大字符数。
 pub const MAX_LAYOUT_NAME_CHARS: usize = 64;
@@ -147,6 +149,7 @@ impl StateStore {
         )?;
         conn.execute_batch(SCHEMA)?;
         conn.execute_batch(BACKTEST_SCHEMA)?;
+        conn.execute_batch(COMPARISON_SCHEMA)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })

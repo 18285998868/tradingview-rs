@@ -148,10 +148,10 @@ tokio 的 worker 线程只做调度。读 zip（实测 52ms）这类同步重活
 - 范围：Binance 现货、只做多、12 个原生周期；策略为双均线 `dual_ma`，默认 `fast=10, slow=30`。
 - 数据：worker 直接读 `{data_dir}/binance/data/spot/{daily,monthly}/klines`，不经过 `/api/market-types`；`spot` 仍不在行情接口对外暴露。
 - 计算：Rust 写请求 JSON → 子进程 `python -m backtest_worker.cli` → vectorbt 1.2.0 计算 → Rust 读取结果并落库；Python 只读现货 zip，不依赖 `libbinance_core.so`。
-- 接口：`/api/backtests` 提供 config/提交/列表/详情/日志/重试/删除/对比/CSV；参数扫描共享 `batch_id`，每组参数一条运行，上限由 `max_grid_runs` 控制。
+- 接口：`/api/backtests` 提供 config/提交/列表/详情/日志/重试/删除/对比/CSV/命名对比；参数扫描共享 `batch_id`，每组参数一条运行，上限由 `max_grid_runs` 控制。
 - 状态：`queued → running → succeeded|failed`；服务重启把遗留的运行标记失败，重试创建新 ID 并保留历史。
 - 保留：指标、回撤事件与交易全量（交易按 `max_trades` 截断）；水下曲线始终降采样保留，权益曲线受 `keep_equity` 控制。
-- 对比：2 到 10 个运行，按时间戳并集对齐，缺失段写 `null`；标的/周期/策略版本/数据区间/成本不一致时警告，参数不同不警告但必须展示。
+- 对比：2 到 10 个运行，按时间戳并集对齐，缺失段写 `null`；标的/周期/策略版本/数据区间/成本不一致时警告，参数不同不警告但必须展示；对比可命名保存、列表找回与删除，运行缺失时以 `missing_runs` 标出。
 - 配置、请求示例、失败语义与验证命令见 [`./docs/backtest.md`](./docs/backtest.md)。
 
 ### 回放（Replay）
@@ -304,7 +304,7 @@ worker_dir = "python"       # 含 backtest_worker/ 的目录
   - 中间件：`DefaultBodyLimit`（`max_body_bytes`）+ Bearer/Basic 认证（`/api/health`、`OPTIONS`、静态资源豁免）
   - 行情 GET：health / market-types / pairs / timeframes / klines / quality
   - 状态：`/api/layouts`、`/api/layouts/{id}`、`/api/drawings`、`/api/preferences`
-  - 回测：`/api/backtests`、`/api/backtests/{id}`、`/log`、`/retry`、`/compare`、`/compare.csv`
+  - 回测：`/api/backtests`、`/api/backtests/{id}`、`/log`、`/retry`、`/compare`、`/compare.csv`、`/comparisons`
 - src/app/state.rs
   - SQLite CRUD + 输入限额 + `spawn_blocking` 调用边界；布局/绘图/偏好 + 回测运行/交易/事件/曲线
 - src/app/backtest/
