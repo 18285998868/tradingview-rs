@@ -73,6 +73,23 @@ node --test scripts/*.test.mjs
 - `scripts/indicators.parity.test.mjs`：26 个指标的 parity（原有用例不变）；
 - `scripts/chart-incremental.test.mjs`：尾部扩展、最后一根改写、缩短/改时间/乱序回退、指标前缀兼容、有值变无值回退。
 
+## 浏览器冒烟
+
+构建：Vite 6.4.2（临时 `node_modules` 放在仓库外，不进入仓库），104 个模块，产物 `index-*.js` 486.58 kB（gzip 148.74 kB）、`index-*.css` 6.09 kB（gzip 1.57 kB）。
+
+运行：release 二进制 + `/tmp` 状态库 + headless Firefox（geckodriver 0.37.1），预置 `last_session` 为 `futures/BTCUSDT/1h`，指标 SMA + MACD。
+
+| 操作 | 结果 |
+|---|---|
+| 首次加载 | 图表与 MACD 子窗格渲染，`400 条K线`（初始自动向右预取一页） |
+| 进入回放 | `1801 / 2000`，光标在 2026-11-06 00:00 |
+| 步进 5 次 | `1806 / 2000` |
+| 播放 1.2 s 后暂停 | `1807 / 2000` |
+| 重置 | 回到 `1801 / 2000`（前缀缩短，走整段 `setData` 回退） |
+| 退出回放 | 恢复 `2000 条K线`，回放控件隐藏，视口回到进入前 |
+
+全程指标条保持 SMA/MACD 两个 chip，未重建；控制台只有浏览器的 `ResizeObserver loop completed with undelivered notifications` 警告，没有应用异常。该冒烟覆盖了尾部增量、播放/步进、重置回退、退出全量重绘四条路径。
+
 ## 取舍
 
 1. `prependData` 无法避免整段 `setData`：lightweight-charts 只提供 `setData` / `update`，没有 prepend。分页向左仍是 O(全量)，但只发生在用户滚动到左边缘时，频率远低于回放逐根前进。
