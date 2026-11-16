@@ -9,9 +9,9 @@
 | 层 | 验收项 | 结果 | 关键数据 |
 |---|---|---|---|
 | 第零层 数据 | AC-D01/D02/D03/D04/D05/D06/D07 | 通过 | 3 标的 × 12 周期 × 1000 根 OHLC 零差异；149,048 行逐字段零差异；重复导入零重写；异常注入计数与样例齐全；110 个跨周期窗口 OHLC 零差异；100 标的 × 12 周期全量导入 14.4 分钟、10.82 GB、0 失败；一年 1m 查询 P95 362 毫秒 |
-| 第一层 正确性 | AC-B01/B02/B03/B06/B07、AC-R01/R02/R04 | 通过 | 38 项 unittest 全绿（2 项真实数据用例按环境跳过）；逐笔、权益、回撤事件与指标和独立实现一致 |
+| 第一层 正确性 | AC-B01/B02/B03/B04/B05/B06/B07、AC-R01/R02/R04/R05 | 通过 | 38 项 unittest（36 通过、2 项真实数据用例按环境跳过）；逐笔、权益、回撤事件与指标和独立实现一致；100 组扫描参数映射精确；keep_equity=false 时权益表 0 行、重试与删除后无孤儿 |
 | 第二层 性能 | AC-P01/P02/P03/P04 | 通过 | 1m 全量单组中位 13.38 秒；100 组 164.74 秒；5 并发 P95 22.9 毫秒、0 错误；压力回测峰值 RSS 1.587 GiB、磁盘 37.35 GiB |
-| 第三层 浏览器 | AC-C01/V02/V03/V04/V06/C07/V05/V07 | 通过 | 对比 P95 94 毫秒；首屏冷 268 毫秒、热 258 毫秒；同区间切换中位 93 毫秒；9,939 根 60.34 fps；命名对比跨重启找回；26 个指标 16,800 点与接口快照一致；三浏览器六组合布局检查全过 |
+| 第三层 浏览器 | AC-C01/C02/C05/V02/V03/V04/V06/C07/V05/V07 | 通过 | 对比 P95 94 毫秒；100 组扫描勾选 10 组的指标与详情一致、CSV 10 行一致；首屏冷 268 毫秒、热 258 毫秒；同区间切换中位 93 毫秒；9,939 根 60.34 fps；命名对比跨重启找回；26 个指标 16,800 点与接口快照一致；三浏览器六组合布局检查全过 |
 | 第四层 工具链、安全与运维 | AC-S01/S02/P04/P05/P07 | 通过 | 依赖审计 0 漏洞；Bearer/Basic 与可配置上限生效；23 个非法用例 4xx；Compose 单命令启动 6.3 秒，重启/重建后 2 个运行与 9 张表一致；快照恢复后 9 张表行数一致、10 个回测详情一致 |
 
 浏览器兼容覆盖 Firefox 最新两个大版本与 Chromium 当前大版本；Docker Compose
@@ -218,7 +218,7 @@ numpy 重算双均线只做多策略。对账口径在实现前先冻结：
 | 真实数据 | BTCUSDT 1h 2024 年上半年 4,368 根，引擎对参考实现 | 逐笔与指标一致 |
 | 跨周期 | 1m 聚合出 1h/1d，与原生归档逐根对比 | OHLC 一致 |
 
-执行结果：`Ran 35 tests in 7.068s`，退出码 0。真实数据用例由环境变量
+执行结果：`Ran 38 tests in 3.429s`，`OK (skipped=2)`，退出码 0。真实数据用例由环境变量
 `TRADINGVIEW_REAL_DATA` 门控，未设置时跳过。
 
 ### 发现并修复的缺陷
@@ -231,6 +231,20 @@ numpy 重算双均线只做多策略。对账口径在实现前先冻结：
    索引直接转毫秒整数。该改动只影响性能，不改变数值。
 3. 逐行解析 1m 归档约 485 万行，是单组回测的主要耗时；改为 pandas C 解析器
    整块读取后再向量化校验、过滤、拼接。
+
+### AC-R05 保留策略与孤儿数据
+
+- 默认 `keep_equity = true`，保存降采样权益与水下曲线；Rust 集成测试断言详情
+  返回 2 个权益点与 3 个水下点。默认值在 `BacktestConfig::default` 冻结。
+- 演练 `scripts/retention_check.py` 用 `keep_equity = false` 启动临时服务：
+  BTCUSDT 1h 2024 年 Q1（2,184 根）单组回测成功，`retention = underwater_only`；
+  详情 `equity = []`，`backtest_equity` 0 行；水下曲线 1,098 点、15 个回撤事件、
+  49 笔交易与全部指标仍在。
+- 重试生成新运行 ID，旧运行的水下曲线保持 1,098 点不变；两次运行在同一
+  SQLite 库中共存，`pragma foreign_key_check` 为空。
+- 依次删除原运行与重试运行：`backtest_runs` 及交易、回撤事件、权益、水下四张
+  子表计数全部为 0，`pragma foreign_key_check` 仍为空。
+- 结果：`/tmp/r05/result.json`，`ok = true`。
 
 ### 限制
 
@@ -337,6 +351,22 @@ canvas 几何与回测抽屉边界，并保存截图。
   阈值 3 秒（规格目标 2 秒），通过。
 - 10 条曲线均渲染，10 种颜色可区分；图例开关后曲线数 10 → 9 → 10。
 
+### AC-C02/C05 100 组扫描与 10 组对比
+
+- 演练 `scripts/compare_selection_check.py` 用临时服务提交 100 组参数扫描
+  （fast 2–11 × slow 20–80），100 个运行全部成功且同批次；运行 ID 唯一，
+  参数映射与 `params_text` 逐项精确。
+- 从结果中取首尾各 5 组共 10 组进入对比：`series` 10 条、并集 1,129 点；
+  请求顺序与 `series` 顺序一致；每个运行的指标与详情接口完全相等；标签含
+  参数与短 ID；参数不同不产生元数据警告。
+- 11 组请求返回 400，错误写明 `at most 10`，不静默截断。
+- CSV 导出 10 行 × 29 列，表头与列序固定；运行 ID 保持请求顺序；14 个指标
+  列与详情数值逐项一致（容差 1e-9）。
+- 前端运行列表支持默认、收益、夏普与最大回撤四种顺序：纯函数
+  `frontend/src/backtest-sort.ts` 由 5 项 node 测试覆盖，收益/夏普降序、
+  回撤深度升序，缺失指标排最后且不修改入参数组。
+- 结果：`/tmp/c05/result.json`，`ok = true`；整个演练 7.2 秒。
+
 ### AC-V02 首屏
 
 每轮重启 release 服务进程（进程内 DataLoader 缓存清空）并用全新 Firefox 会话
@@ -423,7 +453,7 @@ canvas 几何与回测抽屉边界，并保存截图。
   （`1793174400000` 至 `1794610800000`）。
 - 26 个指标、42 条 series、16,800 个数值点在默认参数下与冻结快照
   `frontend/scripts/fixtures/indicator-snapshot.json` 逐点 `deepEqual`，包括
-  null 暖机位；前端测试 29 项全绿。
+  null 暖机位；前端测试 34 项全绿。
 - 数值正确性另由 `indicators.parity.test.mjs` 覆盖：SMA/EMA/RSI/ATR/MACD/
   Ichimoku 与独立参考公式逐点核对，其余指标校验 Pine 首有效 bar、值域与
   “只用当前及历史 bar”的前缀不变性。
@@ -467,7 +497,10 @@ Compose 容器内的同一份前端构建逐组新建会话。
 - `cargo deny`：仓库没有 `deny.toml`，本轮不适用。
 - `unsafe`：`src` 与 `tests` 中 0 处，Miri 不适用于当前代码。
 - `cargo fmt --check`、`clippy -D warnings`、`cargo test`、`cargo doc` 在最终提交前
-  统一执行，结果见提交记录。
+  统一执行：`cargo test -p tradingview-backend` 共 137 项通过（lib 108、
+  `backtest_test` 8、`http_compression_test` 3、`integration_test` 7、
+  `udf_contract_test` 10、`udf_test` 1），0 失败、0 忽略；`cargo doc` 以
+  `RUSTDOCFLAGS="-D warnings"` 运行 `--no-deps --document-private-items`，无警告。
 
 ### AC-S01 网络边界与认证
 
@@ -593,6 +626,17 @@ TRADINGVIEW_REAL_DATA=/data/data /data/vbt/.venv/bin/python -m unittest discover
 cd ../frontend
 npm run build
 npm test
+
+cd ..
+# AC-R05：keep_equity=false、重试与级联删除
+python3 scripts/retention_check.py \
+    --binary target/release/tradingview --data-dir /data/data \
+    --work-dir /tmp/r05 --port 3015
+
+# AC-C02/C05：100 组扫描、10 组对比、11 组拒绝与 CSV
+python3 scripts/compare_selection_check.py \
+    --binary target/release/tradingview --data-dir /data/data \
+    --work-dir /tmp/c05 --port 3016
 ```
 
 数据层验收：

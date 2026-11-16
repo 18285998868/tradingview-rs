@@ -136,6 +136,10 @@ queued -> running -> succeeded
 命名对比的保存/找回/删除、CSV、日志、重试与删除。点击运行详情会把买卖点叠加
 到主图，可单独清除。
 
+运行列表可按默认（接口顺序）、收益、夏普与最大回撤排序。排序只在前端进行：
+收益与夏普降序、最大回撤深度升序，缺失指标的运行固定排最后，不改变接口顺序、
+轮询结果与已勾选集合。
+
 ## 验证
 
 ```bash
@@ -147,8 +151,18 @@ cd python
 TRADINGVIEW_REAL_DATA=/data/data /data/vbt/.venv/bin/python -m unittest discover -s tests -v
 
 # 前端类型检查与单测
-cd frontend && npm run build
-cd frontend && npm test
+cd ../frontend
+npm run build
+npm test
+
+# 保留策略与对比演练（需先 cargo build --release）
+cd ..
+python3 scripts/retention_check.py \
+    --binary target/release/tradingview --data-dir /data/data \
+    --work-dir /tmp/r05 --port 3015
+python3 scripts/compare_selection_check.py \
+    --binary target/release/tradingview --data-dir /data/data \
+    --work-dir /tmp/c05 --port 3016
 ```
 
 `python/tests/reference.py` 是不依赖 vectorbt 的 pandas/numpy 参考实现，覆盖成本

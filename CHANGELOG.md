@@ -73,6 +73,9 @@
 - `SPEC.md`、`docs/adr/0001-rust-python-vectorbt.md`、`STEP.d/08-backtest.md`、`docs/backtest.md`：冻结规格、架构裁决与阶段文档。
 - `config/config.example.toml`：补 `[backtest]` 全字段示例。
 - `.gitignore`：忽略 `__pycache__/` 与 `*.pyc`。
+- `frontend/src/backtest-sort.ts` + `frontend/scripts/backtest-sort.test.mjs`：运行列表按默认/收益/夏普/最大回撤排序，缺失指标排最后；5 项 node 测试，前端测试共 34 项。
+- `scripts/retention_check.py`：AC-R05 演练，`keep_equity=false` 保留策略、重试与级联删除、`foreign_key_check`。
+- `scripts/compare_selection_check.py`：AC-C02/C05 演练，100 组参数扫描、10 组勾选对比、11 组拒绝与 CSV 指标一致性。
 
 ### Fixed
 
