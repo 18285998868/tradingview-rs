@@ -243,7 +243,7 @@ compare 每次带 10 个运行 ID。
 - 新增 `backtest_comparisons` 表（`003_comparisons.sql`）与
   `GET/POST /api/backtests/comparisons`、`DELETE /api/backtests/comparisons/{id}`；
   名称 1 至 64 字符且唯一，保存 2 至 `max_compare_runs` 个已成功运行。
-- 接口演练 25 项断言全过：保存返回 201；同名、空名、65 字符、1 个 ID、重复 ID
+- 自动化演练 25 项断言全过：保存返回 201；同名、空名、65 字符、1 个 ID、重复 ID
   均 400；不存在的运行 404；重启服务后按 ID 找回且 `run_ids` 顺序一致；删除一个
   运行后 `missing_runs` 实时变为 1；删除命名对比返回 204 且列表清空。
 - 浏览器演练（Firefox 160，1366×854）：勾选 2 个运行、填名保存后列表立即出现；
