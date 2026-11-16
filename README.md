@@ -344,7 +344,7 @@ cd python && /data/vbt/.venv/bin/python -m unittest discover -s tests -v
 ```
 
 回测真实数据冒烟与接口验证见 [`./docs/backtest.md`](./docs/backtest.md)，行情数据
-口径与数据层验收见 [`./docs/data.md`](./docs/data.md)，四层验证结果见
+口径与数据层验收见 [`./docs/data.md`](./docs/data.md)，五层验证结果见
 [`./docs/validation.md`](./docs/validation.md)，服务冒烟脚本见 [`./STEP.md`](./STEP.md) 模块五。
 
 > 工具链由 `rust-toolchain.toml` 固定为 `channel = "stable"`，上述命令无需手工指定版本号。

@@ -3,7 +3,7 @@
 本文说明回测子系统的边界、接口、状态机与验证方式。架构裁决见
 [`./adr/0001-rust-python-vectorbt.md`](./adr/0001-rust-python-vectorbt.md)；
 分阶段实现记录见 [`../STEP.d/08-backtest.md`](../STEP.d/08-backtest.md)；
-四层验证的方法、数据与偏差见 [`./validation.md`](./validation.md)。
+五层验证的方法、数据与偏差见 [`./validation.md`](./validation.md)。
 
 ## 范围
 

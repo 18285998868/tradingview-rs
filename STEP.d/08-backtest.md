@@ -70,7 +70,7 @@ POST /api/backtests
 
 ## 验证结果
 
-四层验证的方法与逐项数据见 `../docs/validation.md`，摘要：
+五层验证的方法与逐项数据见 `../docs/validation.md`，摘要：
 
 - 正确性：35 项 Python unittest 全绿，含独立 pandas/numpy 参考实现；合成随机
   游走、10 组固定净值、成本手算、无前视、降采样、3 次哈希与真实 BTCUSDT 1h
@@ -111,5 +111,5 @@ POST /api/backtests
 - Python：数据读取（日/月归档覆盖）、回撤、指标、引擎无前视、CLI 端到端；
 - Rust：迁移、运行状态机、参数网格、对比警告、上限、CSV、失败恢复；
 - 前端：`tsc` + 现有 node 测试；
-- 浏览器、性能、部署与安全：已按 `../docs/validation.md` 的四层计划执行；
-  剩余数据导入项与单机/桌面边界同文列出。
+- 浏览器、性能、部署与安全：已按 `../docs/validation.md` 的五层计划执行；
+  数据导入项已在第零层补齐，单机/桌面边界同文列出。
