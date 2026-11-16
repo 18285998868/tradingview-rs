@@ -361,6 +361,28 @@ html, body, #app {
   margin-bottom: 8px;
 }
 
+.bt-section-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.bt-section-actions select {
+  padding: 2px 6px;
+  border: 1px solid #45475a;
+  border-radius: 4px;
+  background: #313244;
+  color: #cdd6f4;
+  font-size: 11px;
+  cursor: pointer;
+  outline: none;
+}
+
+.bt-section-actions select:hover,
+.bt-section-actions select:focus {
+  border-color: #89b4fa;
+}
+
 .bt-section-title button,
 .bt-run-actions button,
 .bt-compare-actions button:not(.bt-primary) {

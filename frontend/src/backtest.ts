@@ -12,6 +12,7 @@ import {
   saveComparison,
   submitBacktest,
 } from './api';
+import { sortRuns, type RunSortKey } from './backtest-sort';
 import type {
   BacktestConfigResponse,
   BacktestMetrics,
@@ -186,6 +187,7 @@ export class BacktestPanel {
   private panel: HTMLElement;
   private config: BacktestConfigResponse = { enabled: false };
   private runs: BacktestRunSummary[] = [];
+  private runSort: RunSortKey = 'created';
   private detail: BacktestRunDetail | null = null;
   private compare: CompareResponse | null = null;
   private selected = new Set<string>();
@@ -195,6 +197,7 @@ export class BacktestPanel {
   private busy = false;
   private statusEl: HTMLElement;
   private runsEl: HTMLElement;
+  private sortSelect: HTMLSelectElement;
   private detailSection: HTMLElement;
   private detailEl: HTMLElement;
   private compareSection: HTMLElement;
@@ -241,7 +244,18 @@ export class BacktestPanel {
           <div id="bt-status" class="bt-status"></div>
         </section>
         <section class="bt-section">
-          <div class="bt-section-title"><span>运行记录</span><button id="bt-refresh">刷新</button></div>
+          <div class="bt-section-title">
+            <span>运行记录</span>
+            <span class="bt-section-actions">
+              <select id="bt-sort" title="运行排序">
+                <option value="created">默认</option>
+                <option value="return">收益</option>
+                <option value="sharpe">夏普</option>
+                <option value="drawdown">最大回撤</option>
+              </select>
+              <button id="bt-refresh">刷新</button>
+            </span>
+          </div>
           <div id="bt-runs" class="bt-runs"></div>
         </section>
         <section class="bt-section" id="bt-detail-section" hidden>
@@ -257,6 +271,7 @@ export class BacktestPanel {
 
     this.statusEl = panel.querySelector('#bt-status')!;
     this.runsEl = panel.querySelector('#bt-runs')!;
+    this.sortSelect = panel.querySelector('#bt-sort')!;
     this.detailSection = panel.querySelector('#bt-detail-section')!;
     this.detailEl = panel.querySelector('#bt-detail')!;
     this.compareSection = panel.querySelector('#bt-compare-section')!;
@@ -276,6 +291,10 @@ export class BacktestPanel {
 
     panel.querySelector('#bt-close')!.addEventListener('click', () => this.close());
     panel.querySelector('#bt-refresh')!.addEventListener('click', () => void this.refreshRuns());
+    this.sortSelect.addEventListener('change', () => {
+      this.runSort = this.sortSelect.value as RunSortKey;
+      this.renderRuns();
+    });
     panel.querySelector('#bt-clear-markers')!.addEventListener('click', () => {
       this.host.showMarkers(null);
       this.statusEl.textContent = '已清除图表买卖点';
@@ -411,7 +430,7 @@ export class BacktestPanel {
       return;
     }
     const maxCompare = this.config.limits?.max_compare_runs ?? 10;
-    for (const run of this.runs) {
+    for (const run of sortRuns(this.runs, this.runSort)) {
       const row = document.createElement('div');
       row.className = `bt-run ${run.status}`;
 
