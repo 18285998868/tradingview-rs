@@ -247,10 +247,12 @@ cargo clippy -p tradingview-backend --all-targets -- -D warnings
 cargo test -p tradingview-backend
 cargo run -p tradingview-backend                  # 读 config/config.toml，:3001 对外
 cd frontend && npm install && npm run dev         # 前端 dev（:5173，/api 代理到 :3001）
-cd frontend && npm run build                       # 产物进 frontend/dist，被后端同服
+cd frontend && npm run build                       # 产物进 frontend/dist，被后端同服；dist 已入库
 ```
 
 > 工具链由 `rust-toolchain.toml` 固定为 `channel = "stable"`，上述命令无需手工指定版本号。
+>
+> `frontend/dist` 是入库产物：改 `frontend/src` 后必须重新 build 并提交 `dist`，否则后端默认静态目录仍提供旧包。
 
 ## 配置
 
