@@ -300,7 +300,9 @@ export class App {
     });
 
     this.pairSearch.addEventListener('input', () => this.onPairSearchInput());
-    this.pairSearch.addEventListener('focus', () => this.onPairSearchInput());
+    // 输入框平时显示当前交易对；聚焦时若没改过文本，就按空查询展示全量，
+    // 否则下拉里只剩当前这一项，看起来像"只有一个交易对"。
+    this.pairSearch.addEventListener('focus', () => this.onPairSearchFocus());
     this.pairSearch.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         const first = this.matchPairs(this.pairSearch.value)[0];
@@ -896,7 +898,16 @@ export class App {
   }
 
   private onPairSearchInput() {
-    const matched = this.matchPairs(this.pairSearch.value);
+    this.renderPairMatches(this.matchPairs(this.pairSearch.value));
+  }
+
+  /// 聚焦时按空查询展示全量（当前交易对名不算用户输入）。
+  private onPairSearchFocus() {
+    const query = this.pairSearch.value === this._pair ? '' : this.pairSearch.value;
+    this.renderPairMatches(this.matchPairs(query));
+  }
+
+  private renderPairMatches(matched: string[]) {
     this.pairDropdown.innerHTML = '';
     if (matched.length === 0) {
       this.pairDropdown.classList.remove('visible');
