@@ -17,7 +17,7 @@ import {
   type SeriesMarker,
 } from 'lightweight-charts';
 import { DrawingManager, type DrawingKind } from 'lightweight-charts-drawing';
-import type { Kline, StrategyMarker, StrategyOverlay } from './types';
+import type { Kline, StrategyMarker } from './types';
 import type { ActiveIndicator, SubSeries } from './indicators';
 import { safeCalc } from './indicators';
 import { isTailExtension, tailValuesCompatible } from './incremental';
@@ -52,7 +52,7 @@ export interface ChartManager {
   setViewport(v: Viewport | null): void;
   onViewportChange(cb: () => void): () => void;
   applyIndicators(indicators: ActiveIndicator[], klines: Kline[]): void;
-  setStrategy(markers: StrategyMarker[], overlays: StrategyOverlay[]): void;
+  setBacktestMarkers(markers: StrategyMarker[]): void;
   jumpToTime(time: number): void;
   setDrawingTool(tool: DrawingTool | null): void;
   getDrawingsJSON(): string;
@@ -106,10 +106,7 @@ export function createChartManager(
   const overlayKeys: string[] = [];
   // 策略层全量缓存，只渲染已加载窗口（避免污染时间轴逻辑坐标）。
   // 注意：资金曲线不在主图绘制（与价格同轴会压缩K线），绩效只看面板。
-  let strategyMarkers: StrategyMarker[] = [];
-  let strategyOverlays: StrategyOverlay[] = [];
-  const strategyOverlaySeries: ISeriesApi<'Line'>[] = [];
-  const strategyOverlayKeys: string[] = [];
+  let backtestMarkers: StrategyMarker[] = [];
 
   // 子窗格：v5 原生 pane，共享同一条时间轴与十字光标，不再需要多 chart 同步。
   const subPanes: IPaneApi<Time>[] = [];
@@ -216,51 +213,15 @@ export function createChartManager(
     overlayKeys.length = 0;
   }
 
-  function clearStrategyOverlays() {
-    for (const s of strategyOverlaySeries) {
-      chart.removeSeries(s);
-    }
-    strategyOverlaySeries.length = 0;
-    strategyOverlayKeys.length = 0;
-  }
-
-  function renderStrategyWindow() {
+  function renderBacktestMarkers() {
     if (allKlines.length === 0) {
       seriesMarkers.setMarkers([]);
-      clearStrategyOverlays();
       return;
     }
     const from = allKlines[0].time;
     const to = allKlines[allKlines.length - 1].time;
     const inWindow = (t: number) => t >= from && t <= to;
-    seriesMarkers.setMarkers(toMarkers(strategyMarkers.filter((m) => inWindow(m.time))));
-
-    const visible = strategyOverlays.map((ov, i) => ({
-      key: `${i}:${ov.label}`,
-      points: ov.points
-        .filter((p) => inWindow(p.time) && p.value !== null)
-        .map((p) => ({ time: (p.time / 1000) as UTCTimestamp, value: p.value! })),
-    }));
-    const sameShape =
-      visible.length === strategyOverlaySeries.length &&
-      visible.every((def, i) => def.key === strategyOverlayKeys[i]);
-    if (sameShape) {
-      visible.forEach((def, i) => strategyOverlaySeries[i].setData(def.points));
-      return;
-    }
-
-    clearStrategyOverlays();
-    visible.forEach((def, i) => {
-      const s = chart.addSeries(LineSeries, {
-        color: colorPalette[i % colorPalette.length],
-        lineWidth: 1,
-        lastValueVisible: true,
-        priceLineVisible: false,
-      });
-      s.setData(def.points);
-      strategyOverlaySeries.push(s);
-      strategyOverlayKeys.push(def.key);
-    });
+    seriesMarkers.setMarkers(toMarkers(backtestMarkers.filter((m) => inWindow(m.time))));
   }
 
   function toMarkers(markers: StrategyMarker[]): SeriesMarker<UTCTimestamp>[] {
@@ -426,11 +387,9 @@ export function createChartManager(
       allKlines = klines;
       candleData = toCandle(klines);
       appliedIndicators = null;
-      strategyMarkers = [];
-      strategyOverlays = [];
-      clearStrategyOverlays();
+      backtestMarkers = [];
       candleSeries.setData(candleData);
-      renderStrategyWindow();
+      renderBacktestMarkers();
       const len = klines.length;
       if (len > INITIAL_VISIBLE_BARS) {
         chart.timeScale().setVisibleLogicalRange({ from: len - INITIAL_VISIBLE_BARS, to: len });
@@ -450,7 +409,7 @@ export function createChartManager(
         appliedIndicators = null;
         candleSeries.setData(candleData);
       }
-      renderStrategyWindow();
+      renderBacktestMarkers();
       const len = klines.length;
       suppressEdgeCheck = true;
       if (len > visibleBars) {
@@ -475,7 +434,7 @@ export function createChartManager(
         chart.timeScale().setVisibleLogicalRange({ from: savedRange.from + shift, to: savedRange.to + shift });
         suppressEdgeCheck = false;
       }
-      renderStrategyWindow();
+      renderBacktestMarkers();
     },
 
     appendData(klines: Kline[]) {
@@ -495,7 +454,7 @@ export function createChartManager(
         chart.timeScale().setVisibleLogicalRange(savedRange);
         suppressEdgeCheck = false;
       }
-      renderStrategyWindow();
+      renderBacktestMarkers();
     },
 
     getAllKlines() {
@@ -695,10 +654,9 @@ export function createChartManager(
       setViewport(savedViewport);
     },
 
-    setStrategy(markers: StrategyMarker[], overlays: StrategyOverlay[]) {
-      strategyMarkers = markers;
-      strategyOverlays = overlays;
-      renderStrategyWindow();
+    setBacktestMarkers(markers: StrategyMarker[]) {
+      backtestMarkers = markers;
+      renderBacktestMarkers();
     },
 
     jumpToTime(time: number) {

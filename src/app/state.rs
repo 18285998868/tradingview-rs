@@ -15,6 +15,8 @@ use crate::utils::{valid_pair, valid_timeframe};
 
 /// 初始化表结构（幂等）。
 const SCHEMA: &str = include_str!("../../migrations/001_init.sql");
+/// 回测表结构（幂等）。
+const BACKTEST_SCHEMA: &str = include_str!("../../migrations/002_backtest.sql");
 
 /// 布局名称最大字符数。
 pub const MAX_LAYOUT_NAME_CHARS: usize = 64;
@@ -144,12 +146,14 @@ impl StateStore {
              PRAGMA foreign_keys = ON;",
         )?;
         conn.execute_batch(SCHEMA)?;
+        conn.execute_batch(BACKTEST_SCHEMA)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
     }
 
-    fn conn(&self) -> StateResult<MutexGuard<'_, Connection>> {
+    /// 取数据库连接。回测存储扩展在 `backtest::store` 内实现。
+    pub(crate) fn conn(&self) -> StateResult<MutexGuard<'_, Connection>> {
         self.conn.lock().map_err(|_| StateError::Poisoned)
     }
 
@@ -404,7 +408,7 @@ impl StateStore {
     }
 }
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 

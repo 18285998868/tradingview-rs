@@ -36,6 +36,58 @@ pub struct Config {
     /// 非空时只放行列表内的 origin，并回显匹配的 origin。
     #[serde(default)]
     pub cors_origins: Vec<String>,
+    /// 回测与 Python worker 配置。
+    #[serde(default)]
+    pub backtest: BacktestConfig,
+}
+
+/// 回测子系统配置。
+///
+/// `python_bin` 必须指向装有 vectorbt 1.2.0 的解释器；`worker_dir` 是包含
+/// `backtest_worker/` 的目录。`output_dir` 缺省为 `<data_dir>/backtests`。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BacktestConfig {
+    /// 是否启用回测 API 与后台 worker。
+    pub enabled: bool,
+    /// Python 解释器路径或命令名。
+    pub python_bin: PathBuf,
+    /// Python worker 根目录（包含 `backtest_worker/`）。
+    pub worker_dir: PathBuf,
+    /// 请求/结果/日志目录；缺省 `<data_dir>/backtests`。
+    pub output_dir: Option<PathBuf>,
+    /// 单次 worker 超时（秒）。
+    pub timeout_secs: u64,
+    /// 同时执行的 worker 进程上限。
+    pub max_concurrent: usize,
+    /// 对比运行数量上限（规格上限 10）。
+    pub max_compare_runs: usize,
+    /// 参数扫描展开后的运行数量上限。
+    pub max_grid_runs: usize,
+    /// 每条权益/水下曲线保留的最大点数。
+    pub max_curve_points: usize,
+    /// 单次运行保留的交易明细上限。
+    pub max_trades: usize,
+    /// 是否保存降采样权益曲线；关闭后仍保存水下曲线与指标。
+    pub keep_equity: bool,
+}
+
+impl Default for BacktestConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            python_bin: PathBuf::from("python3"),
+            worker_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python"),
+            output_dir: None,
+            timeout_secs: 1800,
+            max_concurrent: 2,
+            max_compare_runs: 10,
+            max_grid_runs: 100,
+            max_curve_points: 2000,
+            max_trades: 200_000,
+            keep_equity: true,
+        }
+    }
 }
 
 impl Default for Config {
@@ -47,6 +99,7 @@ impl Default for Config {
             db_path: None,
             frontend_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("frontend/dist"),
             cors_origins: Vec::new(),
+            backtest: BacktestConfig::default(),
         }
     }
 }
@@ -83,7 +136,7 @@ impl Config {
     /// 语义校验：`data_dir` 必填；`db_path` 若显式给出则不能为空。
     ///
     /// # Errors
-    /// `data_dir` 或 `db_path` 为空时返回 [`AppError::Config`]。
+    /// `data_dir` 或 `db_path` 为空、回测参数越界时返回 [`AppError::Config`]。
     pub fn validate(self) -> Result<Self, AppError> {
         if self.data_dir.as_os_str().is_empty() {
             return Err(AppError::Config("data_dir must not be empty".into()));
@@ -95,7 +148,65 @@ impl Config {
         {
             return Err(AppError::Config("db_path must not be empty".into()));
         }
+        self.backtest.validate()?;
         Ok(self)
+    }
+}
+
+impl BacktestConfig {
+    /// 校验回测配置的语义边界。
+    ///
+    /// # Errors
+    /// 路径为空或数值越界时返回 [`AppError::Config`]。
+    pub fn validate(&self) -> Result<(), AppError> {
+        if self.python_bin.as_os_str().is_empty() {
+            return Err(AppError::Config(
+                "backtest.python_bin must not be empty".into(),
+            ));
+        }
+        if self.worker_dir.as_os_str().is_empty() {
+            return Err(AppError::Config(
+                "backtest.worker_dir must not be empty".into(),
+            ));
+        }
+        if self
+            .output_dir
+            .as_ref()
+            .is_some_and(|p| p.as_os_str().is_empty())
+        {
+            return Err(AppError::Config(
+                "backtest.output_dir must not be empty".into(),
+            ));
+        }
+        if self.timeout_secs == 0 {
+            return Err(AppError::Config("backtest.timeout_secs must be > 0".into()));
+        }
+        if !(1..=16).contains(&self.max_concurrent) {
+            return Err(AppError::Config(
+                "backtest.max_concurrent must be in 1..=16".into(),
+            ));
+        }
+        if !(2..=10).contains(&self.max_compare_runs) {
+            return Err(AppError::Config(
+                "backtest.max_compare_runs must be in 2..=10".into(),
+            ));
+        }
+        if !(1..=1000).contains(&self.max_grid_runs) {
+            return Err(AppError::Config(
+                "backtest.max_grid_runs must be in 1..=1000".into(),
+            ));
+        }
+        if !(10..=100_000).contains(&self.max_curve_points) {
+            return Err(AppError::Config(
+                "backtest.max_curve_points must be in 10..=100000".into(),
+            ));
+        }
+        if !(1..=10_000_000).contains(&self.max_trades) {
+            return Err(AppError::Config(
+                "backtest.max_trades must be in 1..=10000000".into(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -136,6 +247,41 @@ mod tests {
         assert_eq!(cfg.data_dir, PathBuf::from("/tmp/data"));
         assert!(cfg.frontend_dir.ends_with("frontend/dist"));
         assert!(cfg.db_path.is_none());
+        assert!(cfg.backtest.enabled);
+        assert_eq!(cfg.backtest.max_compare_runs, 10);
+        assert_eq!(cfg.backtest.max_grid_runs, 100);
+    }
+
+    #[test]
+    fn accepts_backtest_table() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = write_cfg(
+            dir.path(),
+            "data_dir = \"/tmp/data\"\n\
+             [backtest]\n\
+             enabled = false\n\
+             python_bin = \"/opt/venv/bin/python\"\n\
+             max_compare_runs = 4\n",
+        );
+        let cfg = Config::load_from(&path).unwrap();
+        assert!(!cfg.backtest.enabled);
+        assert_eq!(
+            cfg.backtest.python_bin,
+            PathBuf::from("/opt/venv/bin/python")
+        );
+        assert_eq!(cfg.backtest.max_compare_runs, 4);
+    }
+
+    #[test]
+    fn rejects_backtest_compare_limit_above_ten() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = write_cfg(
+            dir.path(),
+            "data_dir = \"/tmp/data\"\n[backtest]\nmax_compare_runs = 11\n",
+        );
+        let err = Config::load_from(&path).unwrap_err();
+        assert!(matches!(err, AppError::Config(_)));
+        assert!(err.to_string().contains("max_compare_runs"));
     }
 
     #[test]

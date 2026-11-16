@@ -22,6 +22,8 @@ const MAX_KLINE_LIMIT: usize = 10_000;
 pub struct AppState {
     pub(crate) data_loader: Arc<DataLoader>,
     pub(crate) state_store: Arc<StateStore>,
+    /// 回测服务；配置关闭时为 `None`（路由返回 503）。
+    pub(crate) backtest: Option<Arc<super::backtest::service::BacktestService>>,
 }
 
 impl AppState {
@@ -30,13 +32,23 @@ impl AppState {
         Self {
             data_loader: Arc::new(DataLoader::new(data_dir)),
             state_store,
+            backtest: None,
         }
+    }
+
+    /// 挂载回测服务。
+    pub fn with_backtest(
+        mut self,
+        service: Arc<super::backtest::service::BacktestService>,
+    ) -> Self {
+        self.backtest = Some(service);
+        self
     }
 }
 
 /// 统一响应体：成功时 `data` 有值，失败时 `error` 有值。
 #[derive(Serialize)]
-struct ApiResponse<T> {
+pub(crate) struct ApiResponse<T> {
     success: bool,
     data: Option<T>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -44,7 +56,7 @@ struct ApiResponse<T> {
 }
 
 impl<T> ApiResponse<T> {
-    fn ok(data: T) -> Self {
+    pub(crate) fn ok(data: T) -> Self {
         Self {
             success: true,
             data: Some(data),
@@ -52,7 +64,7 @@ impl<T> ApiResponse<T> {
         }
     }
 
-    fn err(msg: impl Into<String>) -> Self {
+    pub(crate) fn err(msg: impl Into<String>) -> Self {
         Self {
             success: false,
             data: None,
@@ -62,7 +74,7 @@ impl<T> ApiResponse<T> {
 }
 
 /// 错误响应（`data` 恒为 `null`）。
-type ErrorResponse = (StatusCode, Json<ApiResponse<serde_json::Value>>);
+pub(crate) type ErrorResponse = (StatusCode, Json<ApiResponse<serde_json::Value>>);
 
 /// 市场类型列表响应。
 #[derive(Serialize)]
@@ -141,12 +153,12 @@ fn require_market_type(market_type: Option<&str>) -> Result<MarketType, ErrorRes
 }
 
 /// 构造 400 响应。
-fn bad_request(msg: impl Into<String>) -> ErrorResponse {
+pub(crate) fn bad_request(msg: impl Into<String>) -> ErrorResponse {
     (StatusCode::BAD_REQUEST, Json(ApiResponse::err(msg)))
 }
 
 /// 构造 404 响应。
-fn not_found(msg: impl Into<String>) -> ErrorResponse {
+pub(crate) fn not_found(msg: impl Into<String>) -> ErrorResponse {
     (StatusCode::NOT_FOUND, Json(ApiResponse::err(msg)))
 }
 
@@ -361,7 +373,7 @@ fn internal_error() -> ErrorResponse {
 }
 
 /// 状态库错误 → HTTP 响应：输入问题 400，其余 500 且脱敏。
-fn handle_state_error(e: StateError) -> ErrorResponse {
+pub(crate) fn handle_state_error(e: StateError) -> ErrorResponse {
     match &e {
         StateError::Invalid(msg) => {
             tracing::warn!(error = %e, "invalid state input");
@@ -626,6 +638,7 @@ pub fn create_router(app_state: AppState) -> Router {
             "/udf/history",
             axum::routing::get(super::udf::history_handler),
         )
+        .merge(super::backtest::routes::router())
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
         .with_state(app_state)
 }

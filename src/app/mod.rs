@@ -1,5 +1,6 @@
 //! 服务编排：校验 → 状态 → 路由 → 监听 → 优雅停机。
 
+pub mod backtest;
 pub mod data_loader;
 pub mod quality;
 pub mod routes;
@@ -93,7 +94,18 @@ pub async fn run(config: &Config) -> Result<(), AppError> {
         .clone()
         .unwrap_or_else(|| data_dir.join("tradingview.db"));
     let state_store = std::sync::Arc::new(state::StateStore::open(&db_path)?);
-    let app_state = AppState::new(data_dir.clone(), state_store);
+    let app_state = if config.backtest.enabled {
+        let service = backtest::service::BacktestService::new(
+            std::sync::Arc::clone(&state_store),
+            &data_dir,
+            config.backtest.clone(),
+        )?;
+        tracing::info!(worker = %service.config().worker_dir.display(), "Backtest worker dir");
+        AppState::new(data_dir.clone(), state_store).with_backtest(std::sync::Arc::new(service))
+    } else {
+        tracing::warn!("backtest API disabled by config");
+        AppState::new(data_dir.clone(), state_store)
+    };
 
     let frontend_dir = config.frontend_dir.clone();
     if !frontend_dir.is_dir() {

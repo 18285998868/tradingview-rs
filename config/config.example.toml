@@ -4,3 +4,16 @@ data_dir = "path/to/data"  # 必填参数, 无默认值, 须指向行情数据�
 # db_path = "path/to/data/tradingview.db"  # 可选参数, 默认值: <data_dir>/tradingview.db；只存布局/绘图/偏好
 frontend_dir = "/data/tradingview-rs/frontend/dist"  # 可选参数, 默认值: <workspace>/frontend/dist
 # cors_origins = ["http://localhost:5173"]  # 可选参数, 默认值: []（全放行，仅本地开发）
+
+[backtest]
+enabled = true              # 可选参数, 默认值: true；false 时 /api/backtests* 返回 503
+python_bin = "/data/vbt/.venv/bin/python"  # 必需向量化后端：装有 vectorbt 1.2.0 的解释器
+worker_dir = "python"       # 含 backtest_worker/ 的目录；相对路径按 CWD 解析
+# output_dir = "path/to/backtests"  # 可选参数, 默认值: <data_dir>/backtests
+timeout_secs = 1800         # 可选参数, 默认值: 1800；单次 worker 超时（秒）
+max_concurrent = 2          # 可选参数, 默认值: 2；并发 worker 进程上限
+max_compare_runs = 10       # 可选参数, 默认值: 10；对比数量上限（规格上限 10）
+max_grid_runs = 100         # 可选参数, 默认值: 100；参数扫描展开后的运行上限
+max_curve_points = 2000     # 可选参数, 默认值: 2000；权益/水下曲线各保留的最大点数
+max_trades = 200000         # 可选参数, 默认值: 200000；单次运行保存的交易明细上限
+keep_equity = true          # 可选参数, 默认值: true；false 时仍保留水下曲线、指标与事件

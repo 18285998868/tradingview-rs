@@ -1,4 +1,17 @@
-import type { ApiResponse, KlinesData, MarketTypesData, PairsData, QualityReport, StrategyResult, TimeframesData } from './types';
+import type {
+  ApiResponse,
+  BacktestConfigResponse,
+  BacktestRunDetail,
+  BacktestRunSummary,
+  CompareResponse,
+  CreateBacktestRequest,
+  KlinesData,
+  MarketTypesData,
+  PairsData,
+  QualityReport,
+  SubmitOutcome,
+  TimeframesData,
+} from './types';
 
 const BASE = '/api';
 
@@ -82,35 +95,72 @@ export async function fetchQuality(params: QualityParams): Promise<QualityReport
   return json.data;
 }
 
-export async function fetchStrategies(): Promise<string[]> {
-  const json = await fetchJson<ApiResponse<{ strategies: string[] }>>(`${BASE}/strategies`);
-  if (!json.success || !json.data) throw new Error(json.error ?? 'unknown error');
-  return json.data.strategies;
-}
-
-export interface StrategyParams {
-  marketType: string;
-  pair: string;
-  timeframe: string;
-  strategyToml: string;
-  initialBalance?: number;
-  feeBps?: number;
-  slippageBps?: number;
-  before?: number;
-  after?: number;
-}
-
-export async function fetchStrategy(params: StrategyParams): Promise<StrategyResult> {
-  let url = `${BASE}/strategy?market_type=${params.marketType}&pair=${params.pair}&timeframe=${params.timeframe}`;
-  url += `&strategy_toml=${encodeURIComponent(params.strategyToml)}`;
-  if (params.initialBalance !== undefined) url += `&initial_balance=${params.initialBalance}`;
-  if (params.feeBps !== undefined) url += `&fee_bps=${params.feeBps}`;
-  if (params.slippageBps !== undefined) url += `&slippage_bps=${params.slippageBps}`;
-  if (params.before !== undefined) url += `&before=${params.before}`;
-  if (params.after !== undefined) url += `&after=${params.after}`;
-  const json = await fetchJson<ApiResponse<StrategyResult>>(url);
+export async function fetchBacktestConfig(): Promise<BacktestConfigResponse> {
+  const json = await fetchJson<ApiResponse<BacktestConfigResponse>>(`${BASE}/backtests/config`);
   if (!json.success || !json.data) throw new Error(json.error ?? 'unknown error');
   return json.data;
+}
+
+export async function submitBacktest(input: CreateBacktestRequest): Promise<SubmitOutcome> {
+  const json = await requestJson<ApiResponse<SubmitOutcome>>(
+    `${BASE}/backtests`,
+    jsonInit('POST', input),
+  );
+  if (!json.success || !json.data) throw new Error(json.error ?? 'unknown error');
+  return json.data;
+}
+
+export async function fetchBacktests(limit = 100): Promise<BacktestRunSummary[]> {
+  const json = await fetchJson<ApiResponse<BacktestRunSummary[]>>(`${BASE}/backtests?limit=${limit}`);
+  if (!json.success || !json.data) throw new Error(json.error ?? 'unknown error');
+  return json.data;
+}
+
+export async function fetchBacktest(id: string): Promise<BacktestRunDetail> {
+  const json = await fetchJson<ApiResponse<BacktestRunDetail>>(
+    `${BASE}/backtests/${encodeURIComponent(id)}`,
+  );
+  if (!json.success || !json.data) throw new Error(json.error ?? 'unknown error');
+  return json.data;
+}
+
+export async function fetchBacktestLog(id: string): Promise<string | null> {
+  const json = await fetchJson<ApiResponse<{ log: string | null }>>(
+    `${BASE}/backtests/${encodeURIComponent(id)}/log`,
+  );
+  if (!json.success || !json.data) throw new Error(json.error ?? 'unknown error');
+  return json.data.log;
+}
+
+export async function retryBacktest(id: string): Promise<SubmitOutcome> {
+  const json = await requestJson<ApiResponse<SubmitOutcome>>(
+    `${BASE}/backtests/${encodeURIComponent(id)}/retry`,
+    { method: 'POST' },
+  );
+  if (!json.success || !json.data) throw new Error(json.error ?? 'unknown error');
+  return json.data;
+}
+
+export async function deleteBacktest(id: string): Promise<void> {
+  const json = await requestJson<ApiResponse<{ deleted: boolean }>>(
+    `${BASE}/backtests/${encodeURIComponent(id)}`,
+    { method: 'DELETE' },
+  );
+  if (!json.success) throw new Error(json.error ?? 'unknown error');
+}
+
+export async function compareBacktests(ids: string[]): Promise<CompareResponse> {
+  const json = await requestJson<ApiResponse<CompareResponse>>(
+    `${BASE}/backtests/compare`,
+    jsonInit('POST', { ids }),
+  );
+  if (!json.success || !json.data) throw new Error(json.error ?? 'unknown error');
+  return json.data;
+}
+
+/** 对比 CSV 下载地址（2..=10 个运行 ID）。 */
+export function compareCsvUrl(ids: string[]): string {
+  return `${BASE}/backtests/compare.csv?ids=${ids.map(encodeURIComponent).join(',')}`;
 }
 
 // ---- 本地状态：命名布局 / 绘图 / 偏好 ----

@@ -1,4 +1,4 @@
-# UDF 重构与协议修复
+# UDF 重构、协议修复与回测
 
 ## 模块一 阶段
 
@@ -9,6 +9,14 @@
 5. **F2 history 语义**（已落地）：`countback` 优先于 `from`、`to` 开区间、`no_data` 带 `nextTime`。
 6. **F3 周期与 session**（已落地）：`1W`/`1M`/`3D`、`has_weekly_and_monthly`、FX `session`。
 7. **G 验收**：静态检查 + 全量测试 + 文档 + 冒烟。
+8. **B0 架构裁决**（已落地）：Rust API/数据/图表层 + Python vectorbt worker，
+   见 `./docs/adr/0001-rust-python-vectorbt.md`。
+9. **B1 Python worker**（已落地）：Binance 现货 12 周期读取、双均线只做多、vectorbt、
+   回撤事件、指标、参数扫描、CLI。
+10. **B2 Rust 回测模块**（已落地）：配置、`002_backtest.sql`、任务状态机、子进程调用、
+    API、对比与 CSV。
+11. **B3 前端**（已落地）：回测面板、运行列表、详情、回撤/水下曲线、10 个对比。
+12. **B4 验收**（已落地）：Python 单测、Rust 门禁、真实数据冒烟、文档与变更记录。
 
 ## 模块二 验收命令
 
@@ -23,10 +31,13 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items
 
 ## 模块三 约束
 
-1. 只改 UDF 模块与文档；`/api/*` 契约、SQLite schema、`data_loader` / `routes` 对外行为不动。
-2. 不新增 crate 依赖。
+1. 旧 UDF 阶段只改 UDF 模块与文档；`/api/*` 契约、SQLite schema、`data_loader` /
+   `routes` 对外行为不动。
+2. 不新增 crate 依赖（旧 UDF 阶段）；回测阶段按需新增 `tokio` 的 `process`/`time`。
 3. 每个阶段先写失败测试，再改实现。
 4. 协议修复必须有官方语义依据，依据写进 `./STEP.d/02-udf-contract.md`。
+5. 回测阶段只做 Binance 现货只做多；做空/永续/杠杆返回明确错误。
+6. Python 与 Rust 的 JSON 契约必须双端测试，任一侧改字段需同步另一侧。
 
 ## 模块四 详细文档
 
@@ -37,6 +48,8 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items
 - 阶段二 响应压缩（A3）：`./STEP.d/05-compression.md`
 - 阶段二 前端增量（A4）：`./STEP.d/06-frontend-incremental.md`
 - 阶段三 数据质量报告：`./STEP.d/07-quality-report.md`
+- 阶段四 回测/回撤/对比：`./STEP.d/08-backtest.md`
+- 架构裁决：`./docs/adr/0001-rust-python-vectorbt.md`
 - 变更记录：`./CHANGELOG.md`
 
 ## 模块五 冒烟
@@ -60,3 +73,9 @@ kill -TERM "$SRV_PID"; wait "$SRV_PID"; echo "exit=$?"
 ```
 
 3. 冒烟结果：全部端点通过，`SIGTERM` 退出码 0，二次启动可复用同一 SQLite 文件。
+4. 回测真实数据冒烟（2026-11-16，BTCUSDT 1h，54341 根）：
+   - 单组 `fast=10/slow=30`：`succeeded`，1090 笔交易、66 个回撤事件、2000 点权益/水下曲线、2180 个买卖点标记；
+   - 2×2 参数扫描：4 条运行共享同一 `batch_id`；
+   - 2 个运行对比：2 条曲线、2010 个并集点、0 条元数据警告；CSV 3 行 × 29 列；
+   - 11 个运行对比返回 400；`SIGTERM` 退出码 0；重启后原运行仍为 `succeeded`。
+   - 冒烟同时暴露并修复：Binance 现货 2025-01-01 起归档时间戳为微秒，worker 现按数量级归一为毫秒。

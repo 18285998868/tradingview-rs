@@ -18,6 +18,12 @@
 - `prependData` 仍整段 `setData`（lightweight-charts 没有 prepend API），但只转换新增的 K 线前缀。
 - 指标条 DOM 只在增删/换序时重建；回放每帧不再重写 `innerHTML`。
 
+- `Cargo.toml`：tokio 增加 `process` / `time`，用于 Python worker 子进程、超时与增量读取 stdout/stderr；未新增其他 crate。
+- `src/config.rs`：新增 `[backtest]` 配置段（`enabled`/`python_bin`/`worker_dir`/`output_dir`/`timeout_secs`/`max_concurrent`/`max_compare_runs`/`max_grid_runs`/`max_curve_points`/`max_trades`/`keep_equity`），缺省启用；`enabled = false` 时 `/api/backtests*` 返回 503。
+- `src/app/state.rs`：启动时同时执行 `001_init.sql` 与 `002_backtest.sql`；删除回测运行时级联清理交易、回撤事件与曲线。
+- 前端：原策略面板位置改为回测面板（`frontend/src/backtest.ts`），主图支持买卖点叠加与单独清除；会话与布局 payload 移除 `strategy` 字段。
+- `README.md`、`STEP.md`、`CHANGELOG.md`、`docs/`：同步回测边界、接口、存储、限制与验证方式。
+
 ### Added
 
 - `GET /api/quality?market_type=&pair=&timeframe=`：基于现有 `DataLoader` 缓存列集输出数据质量报告，含 bar 数/首尾时间、按周期步长推算的应有 bar 数与覆盖率、缺口段数/最长缺口/最多 20 条缺口明细、零/负成交量、OHLC 包络异常、非正价格，以及清洗阶段丢弃的重复时间戳/非有限值行数；`1mo` 按自然月计算缺口，报告不写状态库。
@@ -33,3 +39,13 @@
 - `tests/http_compression_test.rs`：gzip 往返字节相等、小响应不压、`identity` 不压。
 - `src/incremental.ts` + `scripts/chart-incremental.test.mjs`：图表尾部增量判定的纯函数与测试（追加、最后一根改写、缩短/乱序回退、指标前缀兼容）。
 - `STEP.d/06-frontend-incremental.md`：前端增量更新范围与指标重算成本。
+- `python/backtest_worker/`：Binance 现货 zip 读取（12 个原生周期，2025 起的微秒时间戳归一为毫秒）、双均线只做多 vectorbt 1.2.0 引擎（T 收盘信号、T+1 开盘成交）、回撤事件与指标、保端点降采样、参数扫描与 CLI；单组失败只标记该组。
+- `python/tests/`：24 个 unittest，覆盖数据读取（含 2025 起微秒时间戳）、引擎无前视、回撤事件、指标公式与 CLI 契约。
+- `src/app/backtest/`：模型与参数网格、任务状态机与并发许可、Python 子进程（超时/日志/失败重试）、SQLite 事务落库、对比警告与时间并集、CSV、HTTP 路由。
+- `migrations/002_backtest.sql`：`backtest_runs`/`backtest_trades`/`backtest_drawdown_events`/`backtest_equity`/`backtest_underwater` 五张表与索引。
+- `/api/backtests*`：config/提交/列表/详情/日志/重试/删除/对比/CSV；参数扫描共享 `batch_id`，上限 100 组；对比 2–10 个运行，少于 2 或多于 10 返回 400。
+- `frontend/src/backtest.ts`：参数表单、参数扫描、运行轮询、详情、权益/水下 SVG、回撤事件、交易表、10 个对比与图例开关、CSV/日志/重试/删除。
+- `tests/backtest_test.rs`：7 个集成测试，用假 worker 驱动状态机、参数网格、对比上限、失败恢复与重试。
+- `SPEC.md`、`docs/adr/0001-rust-python-vectorbt.md`、`STEP.d/08-backtest.md`、`docs/backtest.md`：冻结规格、架构裁决与阶段文档。
+- `config/config.example.toml`：补 `[backtest]` 全字段示例。
+- `.gitignore`：忽略 `__pycache__/` 与 `*.pyc`。

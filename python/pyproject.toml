@@ -1,0 +1,14 @@
+[project]
+name = "tradingview-backtest-worker"
+version = "0.1.0"
+description = "Binance spot dual-MA backtest worker for tradingview-rs (vectorbt)"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy>=1.26",
+  "pandas>=2.2",
+  "vectorbt==1.2.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["backtest_worker*"]

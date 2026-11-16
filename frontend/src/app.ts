@@ -9,8 +9,6 @@ import {
   fetchPairs,
   fetchPreferences,
   fetchQuality,
-  fetchStrategies,
-  fetchStrategy,
   fetchTimeframes,
   putPreferences,
   replaceDrawings,
@@ -27,29 +25,19 @@ import {
 } from './chart';
 import { findIndicator, getAllIndicators, type ActiveIndicator, type IndicatorDef } from './indicators';
 import { qualityBadge } from './quality';
-import type { Kline, StrategyResult } from './types';
+import type { Kline } from './types';
+import { BacktestPanel } from './backtest';
 
 const PAGE_SIZE = 200;
 const REPLAY_LIMIT = 2000;
-const REPLAY_STRATEGY_DEBOUNCE_MS = 300;
 const PAIR_DROPDOWN_LIMIT = 100;
-const APP_VERSION = 'p6';
+const APP_VERSION = 'p7';
 const SESSION_SAVE_DEBOUNCE_MS = 800;
 const DRAWING_SAVE_DEBOUNCE_MS = 600;
-
-function defaultTomlFor(strategyType: string): string {
-  if (strategyType === 'bbrk') return 'type = "bbrk"\nsigma = 2.0';
-  return `type = "${strategyType}"\nperiod = 20`;
-}
 
 interface IndicatorState {
   id: string;
   params: Record<string, number>;
-}
-
-interface StrategyState {
-  toml: string;
-  applied: boolean;
 }
 
 /** 回放只维护游标；完整 K 线仍在 allKlines，图表只拿 [0..index] 前缀。 */
@@ -67,7 +55,6 @@ interface SessionState {
   pair: string;
   timeframe: string;
   indicators: IndicatorState[];
-  strategy: StrategyState | null;
   viewport: Viewport | null;
 }
 
@@ -92,18 +79,11 @@ export class App {
   /** 已渲染的指标条 id 顺序；回放每帧都会刷新指标，但 DOM 只在增删时重建。 */
   private renderedIndicators = '';
   private allPairs: string[] = [];
-  private activeStrategyToml: string | null = null;
+  private backtestPanel: BacktestPanel | null = null;
   private marketSelect: HTMLSelectElement;
   private pairSearch: HTMLInputElement;
   private pairDropdown: HTMLElement;
   private timeframeSelect: HTMLSelectElement;
-  private strategySelect: HTMLSelectElement;
-  private strategyToml: HTMLTextAreaElement;
-  private strategyEditor: HTMLElement;
-  private strategyError: HTMLElement;
-  private strategyPanel: HTMLElement;
-  private strategyPanelName: HTMLElement;
-  private strategyPanelBody: HTMLElement;
   private infoEl: HTMLElement;
   private qualityBadgeEl: HTMLElement;
   private qualitySeq = 0;
@@ -132,11 +112,6 @@ export class App {
   private drawingLoadToken = 0;
   private unbindViewport: (() => void) | null = null;
   private unbindDrawings: (() => void) | null = null;
-  /** 策略请求序号：只接受最后一次请求，回放高频更新时丢弃过期结果。 */
-  private strategySeq = 0;
-  private strategyTimer: number | null = null;
-  private strategyInFlight = false;
-  private strategyPending = false;
 
   constructor(container: HTMLElement) {
     container.innerHTML = `
@@ -172,27 +147,7 @@ export class App {
           <span id="replay-position" class="replay-position"></span>
         </div>
         <button id="replay-enter" class="time-jump-btn">回放</button>
-        <label>策略</label>
-        <select id="strategy-select"></select>
-        <button id="strategy-config" class="time-jump-btn">⚙配置</button>
-        <button id="strategy-apply" class="time-jump-btn">应用</button>
-        <button id="strategy-clear" class="time-jump-btn">清除</button>
-        <div id="strategy-editor" class="strategy-editor">
-          <div class="strategy-editor-title">策略 TOML（与 vta 离线配置同口径）</div>
-          <textarea id="strategy-toml" class="strategy-toml" rows="8" spellcheck="false"></textarea>
-          <div class="strategy-editor-actions">
-            <button id="strategy-editor-apply" class="time-jump-btn">应用并关闭</button>
-            <button id="strategy-editor-close" class="time-jump-btn">关闭</button>
-          </div>
-          <div id="strategy-error" class="strategy-error"></div>
-        </div>
-        <div id="strategy-panel" class="strategy-panel">
-          <div class="strategy-panel-title">
-            <span id="strategy-panel-name"></span>
-            <button id="strategy-panel-close" class="param-close">✕</button>
-          </div>
-          <div id="strategy-panel-body"></div>
-        </div>
+        <button id="backtest-toggle" class="time-jump-btn">回测</button>
         <div class="indicator-search-wrap">
           <input id="indicator-search" type="text" placeholder="搜索指标..." autocomplete="off" />
           <div id="indicator-dropdown" class="indicator-dropdown"></div>
@@ -219,19 +174,13 @@ export class App {
       <div class="chart-container" id="chart-container">
         <div class="loading">选择交易对和周期</div>
       </div>
+      <div id="backtest-panel" class="backtest-panel"></div>
     `;
 
     this.marketSelect = container.querySelector('#market-select')!;
     this.pairSearch = container.querySelector('#pair-search')!;
     this.pairDropdown = container.querySelector('#pair-dropdown')!;
     this.timeframeSelect = container.querySelector('#timeframe-select')!;
-    this.strategySelect = container.querySelector('#strategy-select')!;
-    this.strategyToml = container.querySelector('#strategy-toml')!;
-    this.strategyEditor = container.querySelector('#strategy-editor')!;
-    this.strategyError = container.querySelector('#strategy-error')!;
-    this.strategyPanel = container.querySelector('#strategy-panel')!;
-    this.strategyPanelName = container.querySelector('#strategy-panel-name')!;
-    this.strategyPanelBody = container.querySelector('#strategy-panel-body')!;
     this.infoEl = container.querySelector('#info')!;
     this.qualityBadgeEl = container.querySelector('#quality-badge')!;
     this.chartContainer = container.querySelector('#chart-container')!;
@@ -251,12 +200,6 @@ export class App {
     const dropdown = container.querySelector('#indicator-dropdown') as HTMLElement;
     const timeJump = container.querySelector('#time-jump') as HTMLInputElement;
     const timeJumpBtn = container.querySelector('#time-jump-btn') as HTMLButtonElement;
-    const applyBtn = container.querySelector('#strategy-apply') as HTMLButtonElement;
-    const clearBtn = container.querySelector('#strategy-clear') as HTMLButtonElement;
-    const configBtn = container.querySelector('#strategy-config') as HTMLButtonElement;
-    const editorApplyBtn = container.querySelector('#strategy-editor-apply') as HTMLButtonElement;
-    const editorCloseBtn = container.querySelector('#strategy-editor-close') as HTMLButtonElement;
-    const panelCloseBtn = container.querySelector('#strategy-panel-close') as HTMLButtonElement;
     const layoutSaveBtn = container.querySelector('#layout-save') as HTMLButtonElement;
     const layoutDeleteBtn = container.querySelector('#layout-delete') as HTMLButtonElement;
     const drawingUndoBtn = container.querySelector('#drawing-undo') as HTMLButtonElement;
@@ -267,21 +210,28 @@ export class App {
 
     this.marketSelect.addEventListener('change', () => this.onMarketChange());
     this.timeframeSelect.addEventListener('change', () => this.onTimeframeChange());
-    this.strategySelect.addEventListener('change', () => {
-      this.strategyToml.value = defaultTomlFor(this.strategySelect.value);
-    });
-    applyBtn.addEventListener('click', () => this.applyStrategy());
-    clearBtn.addEventListener('click', () => this.clearStrategy());
-    configBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      this.strategyEditor.classList.toggle('visible');
-    });
-    editorApplyBtn.addEventListener('click', () => {
-      this.strategyEditor.classList.remove('visible');
-      void this.applyStrategy();
-    });
-    editorCloseBtn.addEventListener('click', () => this.strategyEditor.classList.remove('visible'));
-    panelCloseBtn.addEventListener('click', () => this.clearStrategy());
+
+    const backtestToggle = container.querySelector('#backtest-toggle') as HTMLButtonElement;
+    this.backtestPanel = new BacktestPanel(
+      container.querySelector('#backtest-panel') as HTMLElement,
+      {
+        currentContext: () => {
+          if (!this._pair || !this._timeframe) return null;
+          return {
+            marketType: this.marketSelect.value,
+            pair: this._pair,
+            timeframe: this._timeframe,
+          };
+        },
+        showMarkers: (detail) => {
+          this.chart?.setBacktestMarkers(detail?.markers ?? []);
+        },
+        notify: (message) => {
+          this.infoEl.textContent = message;
+        },
+      },
+    );
+    backtestToggle.addEventListener('click', () => this.backtestPanel?.toggle());
 
     this.layoutSelect.addEventListener('change', () => {
       const id = this.layoutSelect.value;
@@ -336,9 +286,6 @@ export class App {
       if (!t.closest('.pair-search-wrap')) {
         this.pairDropdown.classList.remove('visible');
       }
-      if (!t.closest('#strategy-editor') && !t.closest('#strategy-config') && !t.closest('#strategy-select')) {
-        this.strategyEditor.classList.remove('visible');
-      }
     });
 
     this.init();
@@ -353,7 +300,6 @@ export class App {
         opt.textContent = t;
         this.marketSelect.appendChild(opt);
       }
-      await this.loadStrategyTypes();
       await this.refreshLayoutList();
 
       const preferences: Record<string, unknown> = await fetchPreferences().catch(() => ({}));
@@ -383,9 +329,6 @@ export class App {
         id: a.def.id,
         params: { ...a.params },
       })),
-      strategy: this.strategyToml.value.trim()
-        ? { toml: this.strategyToml.value, applied: this.activeStrategyToml !== null }
-        : null,
       viewport: this.chart?.getViewport() ?? null,
     };
   }
@@ -540,7 +483,6 @@ export class App {
       this.refreshIndicators();
       this.updateReplayUi();
       this.infoEl.textContent = this.dataInfoText();
-      this.scheduleReplayStrategy(0);
       this.scheduleSave();
     } catch (e) {
       this.infoEl.textContent = `加载回放失败: ${e}`;
@@ -575,7 +517,6 @@ export class App {
     this.stopReplayTimer();
     this.updateReplayUi();
     this.infoEl.textContent = this.dataInfoText();
-    this.scheduleReplayStrategy(0);
   }
 
   private stepReplay(): void {
@@ -588,7 +529,6 @@ export class App {
     }
     r.index++;
     this.renderReplayPrefix();
-    this.scheduleReplayStrategy(0);
   }
 
   private resetReplay(): void {
@@ -598,20 +538,12 @@ export class App {
     this.stopReplayTimer();
     r.index = r.startIndex;
     this.renderReplayPrefix();
-    this.scheduleReplayStrategy(0);
   }
 
   private exitReplay(): void {
     if (!this.replay) return;
     const viewport = this.preReplayViewport;
     this.stopReplayTimer();
-    if (this.strategyTimer !== null) {
-      window.clearTimeout(this.strategyTimer);
-      this.strategyTimer = null;
-    }
-    this.strategySeq++;
-    this.strategyInFlight = false;
-    this.strategyPending = false;
     this.replay = null;
     this.preReplayViewport = null;
     this.chart?.setData(this.allKlines);
@@ -619,7 +551,6 @@ export class App {
     if (viewport) this.chart?.setViewport(viewport);
     this.updateReplayUi();
     this.infoEl.textContent = this.dataInfoText();
-    if (this.activeStrategyToml) void this.refreshStrategy();
     this.scheduleSave();
   }
 
@@ -666,43 +597,10 @@ export class App {
     this.refreshIndicators();
     this.updateReplayUi();
     this.infoEl.textContent = this.dataInfoText();
-    this.scheduleReplayStrategy();
-  }
-
-  private replayBefore(): number | undefined {
-    const r = this.replay;
-    if (!r) return undefined;
-    const next = this.allKlines[r.index + 1];
-    if (next) return next.time;
-    return this.allKlines[r.index].time + 1;
-  }
-
-  private scheduleReplayStrategy(delay = REPLAY_STRATEGY_DEBOUNCE_MS): void {
-    if (!this.replay || !this.activeStrategyToml) return;
-    if (this.strategyInFlight) {
-      this.strategyPending = true;
-      return;
-    }
-    if (this.strategyTimer !== null) {
-      if (delay > 0) return;
-      window.clearTimeout(this.strategyTimer);
-      this.strategyTimer = null;
-    }
-    this.strategyTimer = window.setTimeout(() => {
-      this.strategyTimer = null;
-      void this.refreshStrategy();
-    }, delay);
   }
 
   private disposeReplay(): void {
     this.stopReplayTimer();
-    if (this.strategyTimer !== null) {
-      window.clearTimeout(this.strategyTimer);
-      this.strategyTimer = null;
-    }
-    this.strategySeq++;
-    this.strategyInFlight = false;
-    this.strategyPending = false;
     this.replay = null;
     this.preReplayViewport = null;
     this.updateReplayUi();
@@ -713,23 +611,13 @@ export class App {
     try {
       this.teardownChart('加载中...');
       this.marketSelect.value = state.market_type;
-      this.clearStrategyState();
       this.activeIndicators = state.indicators.flatMap((s) => {
         const def = findIndicator(s.id);
         return def ? [{ def, params: { ...def.defaultParams, ...s.params } }] : [];
       });
-      if (state.strategy?.toml) {
-        this.strategyToml.value = state.strategy.toml;
-        const type = state.strategy.toml.match(/^\s*type\s*=\s*"([^"]+)"/m)?.[1];
-        if (type && [...this.strategySelect.options].some((o) => o.value === type)) {
-          this.strategySelect.value = type;
-        }
-      }
-      this.activeStrategyToml = state.strategy?.applied ? state.strategy.toml : null;
 
       await this.loadPairs(state.pair, state.timeframe);
       if (this.chart && state.viewport) this.chart.setViewport(state.viewport);
-      if (this.activeStrategyToml) await this.refreshStrategy();
     } finally {
       this.suppressSave = false;
     }
@@ -909,24 +797,6 @@ export class App {
     document.querySelectorAll('.param-editor').forEach((e) => e.remove());
   }
 
-  private async loadStrategyTypes(): Promise<void> {
-    let types: string[];
-    try {
-      types = await fetchStrategies();
-    } catch {
-      types = ['bbrk', 'sma', 'ema'];
-    }
-    this.strategySelect.innerHTML = '';
-    for (const t of types) {
-      const opt = document.createElement('option');
-      opt.value = t;
-      opt.textContent = t;
-      this.strategySelect.appendChild(opt);
-    }
-    this.strategySelect.value = types.includes('bbrk') ? 'bbrk' : types[0];
-    this.strategyToml.value = defaultTomlFor(this.strategySelect.value);
-  }
-
   private async loadPairs(preferredPair?: string, preferredTimeframe?: string): Promise<void> {
     const pairs = await fetchPairs(this.marketSelect.value);
     this.allPairs = pairs;
@@ -985,7 +855,6 @@ export class App {
     this._timeframe = '';
     this.timeframeSelect.disabled = true;
     this.activeIndicators = [];
-    this.clearStrategyState();
     this.teardownChart('选择周期');
     await this.loadTimeframes();
     this.scheduleSave();
@@ -1071,130 +940,6 @@ export class App {
       if (klines.length > 0) this.chart.applyIndicators(this.activeIndicators, klines);
     }
     this.scheduleSave();
-  }
-
-  private async applyStrategy(): Promise<void> {
-    if (!this.chart || !this._pair || !this._timeframe) {
-      this.infoEl.textContent = '请先加载K线数据';
-      return;
-    }
-    const toml = this.strategyToml.value.trim();
-    if (!toml) {
-      this.infoEl.textContent = '策略 TOML 为空';
-      return;
-    }
-    this.activeStrategyToml = toml;
-    await this.refreshStrategy();
-    this.scheduleSave();
-  }
-
-  private async refreshStrategy(): Promise<void> {
-    const toml = this.activeStrategyToml;
-    const chart = this.chart;
-    if (!toml || !chart || this.allKlines.length === 0) return;
-    const market = this.marketSelect.value;
-    const pair = this._pair;
-    const timeframe = this._timeframe;
-    const before = this.replayBefore();
-    const seq = ++this.strategySeq;
-    this.strategyInFlight = true;
-    this.strategyError.textContent = '';
-    this.infoEl.textContent = this.replay
-      ? `${this.dataInfoText()} · 策略计算中...`
-      : '策略计算中...';
-    try {
-      const r = await fetchStrategy({
-        marketType: market,
-        pair,
-        timeframe,
-        strategyToml: toml,
-        ...(before !== undefined ? { before } : {}),
-      });
-      if (
-        seq !== this.strategySeq ||
-        this.chart !== chart ||
-        this.marketSelect.value !== market ||
-        this._pair !== pair ||
-        this._timeframe !== timeframe ||
-        this.activeStrategyToml !== toml
-      ) {
-        return;
-      }
-      chart.setStrategy(r.markers, r.overlays);
-      this.renderStrategyPanel(r);
-    } catch (e) {
-      if (seq === this.strategySeq) {
-        const msg = `策略失败: ${e}`;
-        this.strategyError.textContent = msg;
-        this.infoEl.textContent = msg;
-      }
-    } finally {
-      if (seq === this.strategySeq) {
-        this.strategyInFlight = false;
-        if (this.strategyPending) {
-          this.strategyPending = false;
-          this.scheduleReplayStrategy();
-        }
-      }
-    }
-  }
-
-  private renderStrategyPanel(r: StrategyResult) {
-    const s = r.summary;
-    // null = 该指标算不出来（NaN/Inf），与"真的是 0"区分开，显示为 n/a。
-    const num = (v: number | null, d: number): string => (v === null ? 'n/a' : v.toFixed(d));
-    const pct = (v: number | null, d = 1): string =>
-      v === null ? 'n/a' : `${v >= 0 ? '+' : ''}${v.toFixed(d)}%`;
-    const rows: [string, string][] = [
-      ['交易笔数', `${s.num_trades}`],
-      ['胜率', `${num(s.win_rate, 1)}%`],
-      ['总收益', pct(s.total_return_pct)],
-      ['最大回撤', `${num(s.max_drawdown_pct, 1)}%`],
-      ['Sharpe', num(s.sharpe_ratio, 2)],
-      ['Sortino', num(s.sortino_ratio, 2)],
-      ['盈亏比', num(s.profit_factor, 2)],
-      ['期望', s.expectancy === null ? 'n/a' : `${(s.expectancy * 100).toFixed(3)}%`],
-      ['期末权益', num(s.final_equity, 2)],
-      ['年换手', num(s.turnover_per_year, 1)],
-      ['固定腿收益', pct(s.fixed_total_return)],
-      ['固定腿Sharpe', num(s.fixed_sharpe_ratio, 2)],
-      ['固定腿回撤', `${num(s.fixed_max_drawdown_pct, 1)}%`],
-      ['固定腿单笔期望', `${num(s.fixed_expectancy_bps, 1)}bp`],
-      ['固定腿盈亏比', num(s.fixed_profit_factor, 2)],
-    ];
-    // 参数网格：请求几档 / 实跑几档 / 哪些被跳过。
-    const g = r.param_grid;
-    if (g && g.requested > 1) {
-      rows.push(['参数档位', `${g.ran}/${g.requested} 档（${g.params.join(', ')}）`]);
-      for (const sk of g.skipped ?? []) {
-        rows.push([`跳过 ${sk.params}`, sk.reason]);
-      }
-    }
-    this.strategyPanelName.textContent = `策略绩效 · ${r.strategy} · ${r.count}根`;
-    this.strategyPanelBody.innerHTML = rows
-      .map(([k, v]) => `<div class="strategy-row"><span>${k}</span><span>${v}</span></div>`)
-      .join('');
-    this.strategyPanel.classList.add('visible');
-    this.infoEl.textContent = this.dataInfoText();
-  }
-
-  private clearStrategy() {
-    this.strategySeq++;
-    if (this.strategyTimer !== null) {
-      window.clearTimeout(this.strategyTimer);
-      this.strategyTimer = null;
-    }
-    this.strategyInFlight = false;
-    this.strategyPending = false;
-    this.clearStrategyState();
-    this.chart?.setStrategy([], []);
-    this.scheduleSave();
-  }
-
-  private clearStrategyState() {
-    this.activeStrategyToml = null;
-    this.strategyError.textContent = '';
-    this.strategyPanel.classList.remove('visible');
   }
 
   private onSearchInput(input: HTMLInputElement, dropdown: HTMLElement) {
@@ -1309,7 +1054,6 @@ export class App {
     this.pairDropdown.classList.remove('visible');
     this.timeframeSelect.disabled = true;
     this.activeIndicators = [];
-    this.clearStrategyState();
     this.teardownChart('选择交易对和周期');
     await this.loadPairs();
     this.scheduleSave();
@@ -1320,7 +1064,6 @@ export class App {
     await this.flushPendingSaves();
     this._timeframe = this.timeframeSelect.value;
     this.activeIndicators = [];
-    this.clearStrategyState();
     this.teardownChart('加载中...');
     if (this._timeframe) await this.loadKlines();
     this.scheduleSave();
