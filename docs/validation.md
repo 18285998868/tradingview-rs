@@ -490,6 +490,21 @@ canvas 几何与回测抽屉边界，并保存截图。
 - 快照由 `node scripts/generate-indicator-snapshot.mjs` 生成；改动指标实现时
   必须显式重建快照并复核差异。
 
+### AC-B05 运行列表排序
+
+方法：`scripts/backtest_sort_check.py` 启动 chromedriver，打开回测抽屉，把
+`#bt-sort` 依次切到默认、收益、夏普与最大回撤，读取 `#bt-runs .bt-run` 的渲染
+顺序，与接口指标按同一规则算出的期望顺序比对；规则为收益/夏普降序、回撤深度
+升序、缺失指标最后，同值保持接口顺序，同标题的运行按接口顺序配对。
+
+- 2026-11-16 容器实例（2 条成功运行：收益 31.049/4.647、夏普 4.374/0.919、
+  回撤 12.587/12.659）：四种排序的实际顺序全部与期望一致，`#bt-sort` 四个选项
+  齐全，默认顺序等于接口返回顺序。
+- 反例：dev 实例没有运行记录时脚本以退出码 2 结束并输出 `运行数不足: 0`，
+  不把空列表当成通过。
+- 限制：只覆盖桌面 1366×768；运行数少于 2 或某指标全部相同时无法区分顺序，
+  脚本按环境问题退出 2。
+
 ### AC-V07 浏览器布局兼容
 
 规格要求 Chrome 与 Firefox 最新两个大版本在 1366×768 及以上无阻断性布局错误。
@@ -683,6 +698,11 @@ python3 scripts/retention_check.py \
 python3 scripts/compare_selection_check.py \
     --binary target/release/tradingview --data-dir /data/data \
     --work-dir /tmp/c05 --port 3016
+
+# AC-B05：运行列表排序（需已启动的实例与 chromedriver）
+python3 scripts/backtest_sort_check.py \
+    --binary /usr/bin/chromium --driver /usr/bin/chromedriver \
+    --url http://127.0.0.1:3101 --auth-token "$TV_AUTH_TOKEN" --label container-sort
 ```
 
 数据层验收：
