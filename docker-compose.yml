@@ -1,0 +1,50 @@
+name: tradingview-rs
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      additional_contexts:
+        # Cargo 路径依赖 ../data-reader，构建时只复制两个 core crate。
+        data-reader: ${TV_DATA_READER_DIR:-../data-reader}
+      # 构建阶段需要访问 npm/crates.io；代理只监听回环时设为 host。
+      network: ${TV_BUILD_NETWORK:-default}
+    image: tradingview-rs:${TV_IMAGE_TAG:-local}
+    container_name: tradingview-rs
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    environment:
+      TV_AUTH_TOKEN: ${TV_AUTH_TOKEN:?请在 .env 或环境中设置 TV_AUTH_TOKEN}
+      TV_DATA_DIR: /data
+      TV_STATE_DIR: /state
+      TV_INTERNAL_PORT: "3001"
+    ports:
+      - "${TV_PORT:-3001}:3001"
+    volumes:
+      # 行情数据只读挂载；容器内不写原始数据。
+      - type: bind
+        source: ${TV_DATA_HOST_DIR:-/data/data}
+        target: /data
+        read_only: true
+      # 布局、回测请求/结果和日志都在命名卷里，重启不丢。
+      - type: volume
+        source: state
+        target: /state
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3001/api/health', timeout=3)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    stop_grace_period: 30s
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  state:
+    name: ${TV_STATE_VOLUME:-tradingview-rs-state}
