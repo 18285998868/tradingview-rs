@@ -61,7 +61,7 @@
 - `frontend/src/viewport.ts` + `scripts/viewport.test.mjs`：分块合并去重、视窗取数窗口、区间统计与 100k 根上限的纯函数与测试。
 - `STEP.d/06-frontend-incremental.md`：前端增量更新范围与指标重算成本。
 - `python/backtest_worker/`：Binance 现货 zip 读取（12 个原生周期，2025 起的微秒时间戳归一为毫秒）、双均线只做多 vectorbt 1.2.0 引擎（T 收盘信号、T+1 开盘成交）、回撤事件与指标、保端点降采样、参数扫描与 CLI；单组失败只标记该组。
-- `python/tests/`：35 个 unittest，覆盖数据读取（含 2025 起微秒时间戳）、引擎无前视、收盘权益、成本公式、回撤事件、指标公式、降采样、确定性与 CLI 契约。
+- `python/tests/`：38 个 unittest，覆盖数据读取（含 2025 起微秒时间戳与归档区间裁剪）、引擎无前视、收盘权益、成本公式、回撤事件、指标公式、降采样、确定性与 CLI 契约。
 - `python/tests/reference.py`：不依赖 vectorbt 的 pandas/numpy 参考实现，对合成随机游走、固定净值序列与真实 BTCUSDT 1h 数据逐笔对账。
 - `docs/validation.md`：五层验证报告，记录数据对账、正确性对账、性能基准、浏览器指标、工具链与安全的方法、数据、偏差和未覆盖项。
 - 前端 `performance.mark/measure`：`tv:first-screen` 与 `tv:tf-switch:<timeframe>`，用于首屏和周期切换计时。
