@@ -35,6 +35,7 @@
 - `python/backtest_worker/cli.py`：参数扫描在多组时用 fork 进程池并行，默认最多 4 个，`TRADINGVIEW_WORKERS` 可覆盖；保持参数顺序，单组失败仍只影响该组。
 - `STEP.d/06-frontend-incremental.md`：验证命令改用仓库内 `frontend/node_modules`，不再引用临时目录。
 - `Dockerfile` / `docker-compose.yml`：运行时 pip 安装改用构建参数 `PIP_INDEX_URL`（compose 经 `TV_PIP_INDEX_URL` 传入，默认官方 PyPI），官方源慢时可切镜像站。
+- `frontend/vite.config.ts`：dev server 显式绑 `127.0.0.1:5173`。Node 17+ 把 `localhost` 解析为 `::1`，原配置只监听 `[::1]`，浏览器访问 `127.0.0.1:5173` 会连接失败，与后端 `127.0.0.1:3001` 的口径不一致。
 
 ### Added
 
