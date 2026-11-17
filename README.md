@@ -99,7 +99,7 @@ src/app/data_loader.rs # MarketType{Futures,Spot,Dukascopy} + KlineColumns(SoA) 
 src/app/state.rs    # 状态库：layouts/drawings/preferences + backtest_runs 等 CRUD + 限额校验 + SQLite 连接
 src/app/backtest/   # 回测：model 契约 / store SQLite / service 子进程与状态机 / compare 对比与 CSV / routes
 src/app/udf/        # TradingView UDF：symbol/resolution/history/price/protocol/handlers 六个子模块
-python/backtest_worker/ # 数据读取、双均线 vectorbt 引擎、回撤/指标/降采样、CLI
+python/backtest_worker/ # 数据读取、双均线信号、引擎接口与 vectorbt 适配器、降采样、CLI
 migrations/         # SQLite 表结构（include_str! 进二进制，启动时幂等建表）
 src/config.rs       # 支撑件：Config{host/port/data_dir/db_path/frontend_dir/cors_origins/auth_token/max_body_bytes/backtest} + load/load_from + validate
 src/error.rs        # 支撑件：AppError(Io/Config/ConfigRead/ConfigParse/Data/State/InvalidAddr, non_exhaustive)
@@ -262,7 +262,7 @@ src/app/data_loader.rs # MarketType + KlineColumns(SoA) + DataLoader：两个 re
 src/app/state.rs    # StateStore：layouts/drawings/preferences + 回测运行 CRUD + 限额校验 + SQLite
 src/app/backtest/   # 回测：model 契约/store SQLite/service 子进程与状态机/compare 对比与 CSV/routes
 src/app/udf/        # UDF：symbol/resolution/history/price/protocol/handlers
-python/backtest_worker/ # 数据读取、双均线 vectorbt 引擎、回撤/指标/降采样、CLI
+python/backtest_worker/ # 数据读取、双均线信号、引擎接口与 vectorbt 适配器、降采样、CLI
 migrations/001_init.sql # layouts/drawings/preferences 表
 migrations/002_backtest.sql # backtest_runs/trades/drawdown_events/equity/underwater 表
 src/config.rs       # Config{host/port/data_dir/db_path/frontend_dir/cors_origins/auth_token/max_body_bytes/backtest} + load/load_from + validate

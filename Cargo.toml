@@ -23,7 +23,9 @@ moka = { version = "0.12", default-features = false, features = ["sync"] }
 binance-core = { path = "../data-reader/crates/binance-core" }
 dukascopy-core = { path = "../data-reader/crates/dukascopy-core" }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `float_roundtrip` 让 JSON 浮点解析严格按最近偶数舍入, 与 worker 写出的
+# 十进制 f64 逐位一致; 默认快速路径可能偏 1 ulp, 落库后与 result.json 不等。
+serde_json = { version = "1", features = ["float_roundtrip"] }
 chrono = { version = "0.4", features = ["serde"] }
 # 只开服务端实际用到的能力：多线程 runtime + 宏 + 网络 + 文件 IO + 信号处理（优雅停机）
 # + 子进程（Python worker）+ 超时。

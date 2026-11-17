@@ -16,7 +16,7 @@
 10. **B2 Rust 回测模块**（已落地）：配置、`002_backtest.sql`、任务状态机、子进程调用、
     API、对比与 CSV。
 11. **B3 前端**（已落地）：回测面板、运行列表（默认/收益/夏普/最大回撤排序）、详情、回撤/水下曲线、10 个对比。
-12. **B4 验收**（已落地）：Python 38 项单测（含独立参考实现对账）、Rust 门禁、
+12. **B4 验收**（已落地）：Python 24 项单测（引擎适配器契约与金值）、Rust 门禁、
     真实数据冒烟、五层验证（`./docs/validation.md`）、文档与变更记录。
 
 ## 模块二 验收命令
@@ -30,7 +30,7 @@ cargo test -p tradingview-backend
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items
 
 cd python
-TRADINGVIEW_REAL_DATA=/data/data .venv/bin/python -m unittest discover -s tests -v
+.venv/bin/python -m unittest discover -s tests -v
 
 cd ../frontend
 npm run build
@@ -95,7 +95,11 @@ kill -TERM "$SRV_PID"; wait "$SRV_PID"; echo "exit=$?"
 5. 五层验证（2026-11-16）：数据层 3 标的 × 12 周期 × 1000 根 OHLC 零差异、
    149,048 行逐字段零差异、重复导入零重写、异常注入计数齐全、110 个跨周期
    窗口零差异、100 标的导入 14.4 分钟、一年 1m 查询 P95 362 毫秒；正确性 38 项
-   Python 测试全绿（2 项真实数据用例按环境跳过），1m 全量单组中位 13.38 秒、
+   Python 测试全绿（含 2026-11-17 已删除的 reference 对账层；2 项真实数据用例
+   按环境跳过），1m 全量单组中位 13.38 秒、
    100 组 164.74 秒、5 并发 P95 22.9 毫秒；保留策略与对比演练确认
    `keep_equity=false` 时权益表 0 行、重试/删除无孤儿，100 组扫描勾选 10 组的
    指标与详情一致、CSV 10 行一致；浏览器与安全项见 `./docs/validation.md`。
+6. 引擎复测（2026-11-17）：回测指标改为 vectorbt 原生 accessor，24 项 Python
+   单测全绿；1h 重构前后逐字段对账通过；1m 全量单组中位 13.23 秒，100 组 API
+   端到端 163.28 秒，均低于阈值。

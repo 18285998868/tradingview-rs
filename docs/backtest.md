@@ -23,7 +23,7 @@ Rust 服务负责 API、校验、任务状态、SQLite 持久化、对比与 CSV
 POST /api/backtests
   -> Rust 校验 + 展开参数网格 + 写 backtest_runs(queued)
   -> spawn python -m backtest_worker.cli --request <req>.json --output <res>.json
-  -> worker 读 zip、构造信号、vectorbt 计算、回撤/指标/降采样
+  -> worker 读 zip、构造信号、vectorbt 计算、适配器映射、曲线降采样
   -> Rust 读结果、事务落库、状态置 succeeded/failed
 ```
 
@@ -32,6 +32,23 @@ POST /api/backtests
 - 一次参数扫描在同一个 worker 进程内完成，共享一个批次 ID，每组参数一条运行。
 - worker 的 stdout/stderr 写入日志文件；失败时保留尾部供 `/log` 读取。
 - 归档时间戳统一为毫秒：Binance 现货 2025-01-01 起用微秒，worker 按数量级归一，请求的 `start_ms`/`end_ms` 也按毫秒比较。
+
+## 引擎接口
+
+worker 只依赖 `python/backtest_worker/engine.py` 暴露的两个类型：
+
+- `EngineRequest`：周期、开收盘价、entries/exits、成本、初始资金与输出上限；
+- `Engine` 协议：`run(request)` 返回与 Rust 契约同名的字典。
+
+当前引擎为 `python/backtest_worker/engines/vectorbt_engine.py`：把请求转成
+`vbt.Portfolio.from_signals`，撮合、交易、回撤、水下与指标都取 vectorbt 的结果，
+适配器只做字段改名、单位换算（小数 -> 百分比）与曲线降采样。新增引擎时实现
+`Engine.run()` 并在 `get_engine` 注册即可，CLI、Rust 与前端不需要改。
+
+唯一的性能特化是 `_equity_from_orders`：`portfolio.value()` 在 485 万根 1m bar
+上实测 19–28 秒，整组会从 17 秒级升到 60 秒以上，AC-P01 的 30 秒上限失守。
+适配器改为消费 `orders.records` 线性重建权益，结果与 `value()` 逐 bar 相同
+（max abs diff 0.0）；回撤、水下曲线、收益与指标仍由 vectorbt 计算。
 
 配置示例：
 
@@ -146,9 +163,9 @@ queued -> running -> succeeded
 # Rust 契约与状态机（假 worker）
 cargo test --test backtest_test
 
-# Python 数据读取、引擎、回撤、指标、CLI 与独立参考实现对账
+# Python 数据读取、策略、引擎适配器、降采样与 CLI
 cd python
-TRADINGVIEW_REAL_DATA=/data/data .venv/bin/python -m unittest discover -s tests -v
+.venv/bin/python -m unittest discover -s tests -v
 
 # 前端类型检查与单测
 cd ../frontend
@@ -165,9 +182,9 @@ python3 scripts/compare_selection_check.py \
     --work-dir /tmp/c05 --port 3016
 ```
 
-`python/tests/reference.py` 是不依赖 vectorbt 的 pandas/numpy 参考实现，覆盖成本
-公式、无前视、收盘权益、回撤事件、降采样与确定性；真实数据用例由
-`TRADINGVIEW_REAL_DATA` 门控。完整结果与性能、浏览器、安全验证见
+`python/tests/` 现有 24 项 unittest：数据读取（含 2025 起微秒时间戳与归档区间
+裁剪）、双均线信号无前视、vectorbt 适配器契约（成本、回撤事件、曲线截断、
+确定性）、降采样与 CLI。完整结果与性能、浏览器、安全验证见
 [`./validation.md`](./validation.md)。
 
 真实数据冒烟需要配置 `python_bin` 与 `worker_dir`，然后提交一次单组回测与一次

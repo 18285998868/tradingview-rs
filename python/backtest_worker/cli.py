@@ -14,8 +14,9 @@ from typing import Any
 
 from . import __version__
 from .data import DataError, load_klines
-from .engine import STRATEGY, STRATEGY_VERSION, WORKER_VERSION, run_dual_ma
-from .metrics import PERIODS_PER_YEAR
+from .engine import EngineRequest, WORKER_VERSION, get_engine
+from .strategy import STRATEGY, STRATEGY_VERSION, dual_ma_signals
+from .timeframes import PERIODS_PER_YEAR
 
 
 def _number(request: dict[str, Any], key: str, default: float) -> float:
@@ -146,16 +147,31 @@ def _run_one(
         flush=True,
     )
     try:
-        return run_dual_ma(
-            frame=frame,
-            params=params,
-            timeframe=normalized["timeframe"],
-            fee_bps=normalized["fee_bps"],
-            slippage_bps=normalized["slippage_bps"],
-            initial_balance=normalized["initial_balance"],
-            max_curve_points=normalized["max_curve_points"],
-            max_trades=normalized["max_trades"],
+        entries, exits = dual_ma_signals(frame, params["fast"], params["slow"])
+        engine = get_engine()
+        result = engine.run(
+            EngineRequest(
+                timeframe=normalized["timeframe"],
+                close_price=frame["close"],
+                open_price=frame["open"],
+                entries=entries,
+                exits=exits,
+                fee_bps=normalized["fee_bps"],
+                slippage_bps=normalized["slippage_bps"],
+                initial_balance=normalized["initial_balance"],
+                max_curve_points=normalized["max_curve_points"],
+                max_trades=normalized["max_trades"],
+            )
         )
+        return {
+            "params": params,
+            "params_text": f"fast={params['fast']},slow={params['slow']}",
+            "bars": len(frame),
+            "first_time": int(frame.index[0].timestamp() * 1000),
+            "last_time": int(frame.index[-1].timestamp() * 1000),
+            **result,
+            "error": None,
+        }
     except Exception as exc:  # 单组失败不拖垮整批，交由 Rust 标记该运行 failed
         traceback.print_exc()
         return {
@@ -211,14 +227,8 @@ def execute(request: dict[str, Any]) -> dict[str, Any]:
     """执行请求，返回 worker 结果。"""
 
     normalized = validate_request(request)
-    try:
-        import vectorbt as vbt
-
-        vectorbt_version = getattr(vbt, "__version__", "unknown")
-    except ImportError as exc:
-        raise RuntimeError(
-            "vectorbt is not installed; point backtest.python_bin at the venv that has vectorbt"
-        ) from exc
+    engine = get_engine()
+    engine_version = engine.version()
 
     loaded = load_klines(
         normalized["data_dir"],
@@ -231,7 +241,7 @@ def execute(request: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "worker_version": WORKER_VERSION,
-        "engine": f"vectorbt {vectorbt_version}",
+        "engine": f"{engine.name} {engine_version}",
         "strategy": STRATEGY,
         "strategy_version": STRATEGY_VERSION,
         "pair": normalized["pair"],

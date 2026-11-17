@@ -31,8 +31,10 @@ Python 负责：
 
 - 读取 Binance 现货归档 zip（`{data_dir}/binance/data/spot/...`）；
 - 构造双均线只做多信号，T 收盘生成、T+1 开盘成交；
-- 用 vectorbt `Portfolio.from_orders` 计算权益与交易；
-- 计算回撤事件、汇总指标、降采样曲线；
+- 用 vectorbt `Portfolio.from_signals(close=收盘价, price=开盘价)` 撮合，交易、回撤
+  与指标都取 vectorbt 的输出；适配器只做字段映射与单位换算。权益是唯一特化：
+  按订单记录逐 bar 以收盘价重建，避免 485 万点上 `portfolio.value()` 的秒级开销；
+- 曲线降采样与 JSON 契约输出；
 - 一次进程内完成参数扫描，输出单份 JSON。
 
 ### 交互

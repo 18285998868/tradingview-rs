@@ -37,7 +37,8 @@
 - 前端：原策略面板位置改为回测面板（`frontend/src/backtest.ts`），主图支持买卖点叠加与单独清除；会话与布局 payload 移除 `strategy` 字段。
 - `README.md`、`STEP.md`、`CHANGELOG.md`、`docs/`：同步回测边界、接口、存储、限制与验证方式。
 - `python/backtest_worker/data.py`：归档读取从逐行 `csv` 解析改为 pandas C 解析器整块读取，再向量化做有限值/正价格/负成交量/OHLC 包络校验、时区过滤、日归档覆盖与拼接；1m 全量约 485 万行的读取降到秒级。
-- `python/backtest_worker/engine.py`：成交与估值分离，改用 `from_signals(close=收盘价, price=开盘价)`，并按订单记录线性重建逐 bar 收盘权益；移除 `trades.records_readable`（约 10.3 秒）与逐元素 `Timestamp.timestamp()`。
+- `python/backtest_worker/engine.py`：抽出 `EngineRequest`/`Engine` 协议，vectorbt 实现移到 `engines/vectorbt_engine.py`；成交与估值分离，改用 `from_signals(close=收盘价, price=开盘价)`，并用订单记录线性重建逐 bar 收盘权益（`portfolio.value()` 在 1m 全量上需 19–28 秒，会击穿 AC-P01 的 30 秒上限）。移除 `trades.records_readable`（约 10.3 秒）与逐元素 `Timestamp.timestamp()`。
+- 回测指标与回撤改为 vectorbt 原生口径：删除 `metrics.py`、`drawdown.py` 及自研公式，`equity.vbt.drawdowns`、`returns`、`pf.trades` 直接产出契约字段；Sortino 从“只取负收益 bar”改为 vectorbt 的下行偏差定义，数值会明显变化。`python/tests/` 的 24 项测试改为适配器契约与金值检查，删除不依赖 vectorbt 的 `reference.py` 对账层。
 - `python/backtest_worker/cli.py`：参数扫描在多组时用 fork 进程池并行，默认最多 4 个，`TRADINGVIEW_WORKERS` 可覆盖；保持参数顺序，单组失败仍只影响该组。
 - `STEP.d/06-frontend-incremental.md`：验证命令改用仓库内 `frontend/node_modules`，不再引用临时目录。
 - `Dockerfile` / `docker-compose.yml`：运行时 pip 安装改用构建参数 `PIP_INDEX_URL`（compose 经 `TV_PIP_INDEX_URL` 传入，默认官方 PyPI），官方源慢时可切镜像站。
@@ -69,9 +70,8 @@
 - `src/app/auth.rs`：Bearer/Basic 认证中间件、Base64 解码与常量时间比较，含缺失/错误令牌与 `WWW-Authenticate` 测试。
 - `frontend/src/viewport.ts` + `scripts/viewport.test.mjs`：分块合并去重、视窗取数窗口、区间统计与 100k 根上限的纯函数与测试。
 - `STEP.d/06-frontend-incremental.md`：前端增量更新范围与指标重算成本。
-- `python/backtest_worker/`：Binance 现货 zip 读取（12 个原生周期，2025 起的微秒时间戳归一为毫秒）、双均线只做多 vectorbt 1.2.0 引擎（T 收盘信号、T+1 开盘成交）、回撤事件与指标、保端点降采样、参数扫描与 CLI；单组失败只标记该组。
-- `python/tests/`：38 个 unittest，覆盖数据读取（含 2025 起微秒时间戳与归档区间裁剪）、引擎无前视、收盘权益、成本公式、回撤事件、指标公式、降采样、确定性与 CLI 契约。
-- `python/tests/reference.py`：不依赖 vectorbt 的 pandas/numpy 参考实现，对合成随机游走、固定净值序列与真实 BTCUSDT 1h 数据逐笔对账。
+- `python/backtest_worker/`：Binance 现货 zip 读取（12 个原生周期，2025 起的微秒时间戳归一为毫秒）、双均线只做多信号、`Engine` 接口与 vectorbt 1.2.0 适配器（T 收盘信号、T+1 开盘成交，回撤/水下/指标取 vbt 原生输出）、保端点降采样、参数扫描与 CLI；单组失败只标记该组。
+- `python/tests/`：24 个 unittest，覆盖数据读取（含 2025 起微秒时间戳与归档区间裁剪）、引擎无前视、成本与回撤事件契约、曲线截断、降采样、确定性与 CLI。
 - `docs/validation.md`：五层验证报告，记录数据对账、正确性对账、性能基准、浏览器指标、工具链与安全的方法、数据、偏差和未覆盖项。
 - 前端 `performance.mark/measure`：`tv:first-screen` 与 `tv:tf-switch:<timeframe>`，用于首屏和周期切换计时。
 - `src/app/backtest/`：模型与参数网格、任务状态机与并发许可、Python 子进程（超时/日志/失败重试）、SQLite 事务落库、对比警告与时间并集、CSV、HTTP 路由。
@@ -88,6 +88,7 @@
 
 ### Fixed
 
+- 回测指标落库精度：`serde_json` 默认浮点解析可能偏 1 ulp，`backtest_runs.metrics_json` 与 worker 的 `result.json` 出现无法解释的末位差；`Cargo.toml` 启用 `float_roundtrip` 后，100 组扫描逐字段一致（指标集 SHA-256 `8848c8bc0786eaf0`）。
 - `tv:first-screen` / `tv:tf-switch:*` 曾在视窗应用前记录，测量到默认 227 根的中间态；`applyInitialViewport` 改为返回 Promise 并由调用方 await。
 - 容器尺寸变化时 lightweight-charts 会把首屏 500 根重置为默认密度；`resize()` 现在保留变化前的逻辑区间。
 - 回测权益在开盘价 mark-to-market：旧实现 `from_orders(targetpercent)` 只有一个价格序列，成交价与估值价都用开盘价，导致权益、回撤与收益偏差；现按收盘价重建权益，新增 `test_equity_is_marked_to_close_not_open` 回归测试。
