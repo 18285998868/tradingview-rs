@@ -67,9 +67,12 @@ npm test
 ## 模块五 冒烟
 
 1. 冒烟配置写到 `/tmp`，不碰仓库内被忽略的 `config/*.toml`。
-2. 独立端口 3011 + `/tmp` 状态库，验证静态修复后的端点与优雅停机。
+2. 独立端口 3011 + `/tmp` 状态库，验证静态修复后的端点与优雅停机。冒烟也跑
+   release：debug 解压归档慢一个数量级，1m 长历史的耗时不可比。
 
 ```bash
+cargo build --release -p tradingview-backend
+
 cat >/tmp/tradingview-smoke.toml <<'TOML'
 host = "127.0.0.1"
 port = 3011
@@ -77,7 +80,7 @@ data_dir = "/data/data"
 db_path = "/tmp/tradingview-smoke.db"
 TOML
 
-TRADINGVIEW_CONFIG=/tmp/tradingview-smoke.toml ./target/debug/tradingview &
+TRADINGVIEW_CONFIG=/tmp/tradingview-smoke.toml ./target/release/tradingview &
 SRV_PID=$!
 curl -fsS http://127.0.0.1:3011/api/health
 curl -fsS "http://127.0.0.1:3011/udf/history?symbol=BINANCE:BTCUSDT&resolution=1W&countback=2"

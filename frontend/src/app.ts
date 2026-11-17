@@ -31,7 +31,14 @@ import { computeRangeStats, mergeKlines, timeframeMs, windowForViewport } from '
 import { BacktestPanel } from './backtest';
 
 /** 边缘补加载的单页根数。 */
-const PAGE_SIZE = 500;
+/** 边缘加载批量目标：一次请求循环最多补这么多根，只做一次图表拼接。 */
+const EDGE_BATCH_BARS = 20_000;
+/** 边缘批量拼接后合并指标刷新，避免连续滚动时重复全量重算。 */
+const INDICATOR_REFRESH_DEBOUNCE_MS = 120;
+/** 超过该根数时在信息栏提示数据量（不设硬上限）。 */
+const LARGE_DATA_WARN_BARS = 50_000;
+/** 新会话默认周期；列表里没有时退回该品种的第一个周期。 */
+const DEFAULT_TIMEFRAME = '1m';
 /** 首屏加载根数：可视 500 根 + 左侧缓冲 1000 根（最新端无未来数据）。 */
 const INITIAL_LOAD_BARS = 1500;
 /** 同区间切换周期时视窗两侧各保留的根数。 */
@@ -101,6 +108,8 @@ export class App {
   private exhausted: Record<LoadDirection, boolean> = { left: false, right: false };
   /** 全量加载序号：切周期时旧请求返回后直接丢弃。 */
   private loadSeq = 0;
+  /** 边缘加载后的指标刷新定时器（合并连续拼接）。 */
+  private indicatorTimer: number | null = null;
   private activeIndicators: ActiveIndicator[] = [];
   /** 已渲染的指标条 id 顺序；回放每帧都会刷新指标，但 DOM 只在增删时重建。 */
   private renderedIndicators = '';
@@ -419,7 +428,13 @@ export class App {
   }
 
   private dataInfoText(): string {
-    if (!this.replay) return `${this.allKlines.length} 条K线`;
+    if (!this.replay) {
+      let text = `${this.allKlines.length} 条K线`;
+      if (this.allKlines.length >= LARGE_DATA_WARN_BARS) {
+        text += ' · 数据量较大，交互可能变慢（加载不设上限）';
+      }
+      return text;
+    }
     const r = this.replay;
     const bar = this.allKlines[r.index];
     const dt = bar
@@ -958,7 +973,9 @@ export class App {
     if (timeframes.length > 0) {
       const tf = preferredTimeframe && timeframes.includes(preferredTimeframe)
         ? preferredTimeframe
-        : timeframes[0];
+        : timeframes.includes(DEFAULT_TIMEFRAME)
+          ? DEFAULT_TIMEFRAME
+          : timeframes[0];
       this.timeframeSelect.value = tf;
       this._timeframe = tf;
       await this.loadKlines();
@@ -980,41 +997,69 @@ export class App {
     if (!dir) this.infoEl.textContent = '加载中...';
     try {
       if (dir === 'left') {
-        const before = this.chart!.getFirstTime();
+        let before = this.chart!.getFirstTime();
         if (before === null) return;
-        const data = await fetchKlines({
-          marketType: this.marketSelect.value,
-          pair: this._pair,
-          timeframe: this._timeframe,
-          limit: PAGE_SIZE,
-          before,
-        });
-        if (stale()) return;
-        const bars = data.klines;
-        if (bars.length > 0) {
-          this.allKlines = bars.concat(this.allKlines);
-          this.chart!.prependData(bars);
-          this.refreshIndicators();
+        let collected: Kline[] = [];
+        // 一批 2 万根：每次边缘触发只做一次 prepend + 一次指标刷新，
+        // 而不是每 500 根重排一次整段蜡烛与指标。
+        while (collected.length < EDGE_BATCH_BARS) {
+          const limit = Math.min(MAX_API_PAGE, EDGE_BATCH_BARS - collected.length);
+          const data = await fetchKlines({
+            marketType: this.marketSelect.value,
+            pair: this._pair,
+            timeframe: this._timeframe,
+            limit,
+            before,
+          });
+          if (stale()) return;
+          const bars = data.klines;
+          if (bars.length === 0) {
+            this.exhausted.left = true;
+            break;
+          }
+          collected = bars.concat(collected);
+          before = bars[0].time;
+          if (bars.length < limit) {
+            this.exhausted.left = true;
+            break;
+          }
         }
-        if (bars.length < PAGE_SIZE) this.exhausted.left = true;
+        if (collected.length > 0) {
+          this.allKlines = collected.concat(this.allKlines);
+          this.chart!.prependData(collected);
+          this.scheduleIndicatorRefresh();
+        }
       } else if (dir === 'right') {
-        const after = this.chart!.getLastTime();
+        let after = this.chart!.getLastTime();
         if (after === null) return;
-        const data = await fetchKlines({
-          marketType: this.marketSelect.value,
-          pair: this._pair,
-          timeframe: this._timeframe,
-          limit: PAGE_SIZE,
-          after,
-        });
-        if (stale()) return;
-        const bars = data.klines;
-        if (bars.length > 0) {
-          this.allKlines = this.allKlines.concat(bars);
-          this.chart!.appendData(bars);
-          this.refreshIndicators();
+        let collected: Kline[] = [];
+        while (collected.length < EDGE_BATCH_BARS) {
+          const limit = Math.min(MAX_API_PAGE, EDGE_BATCH_BARS - collected.length);
+          const data = await fetchKlines({
+            marketType: this.marketSelect.value,
+            pair: this._pair,
+            timeframe: this._timeframe,
+            limit,
+            after,
+          });
+          if (stale()) return;
+          const bars = data.klines;
+          if (bars.length === 0) {
+            this.exhausted.right = true;
+            break;
+          }
+          collected = collected.concat(bars);
+          after = bars[bars.length - 1].time;
+          if (bars.length < limit) {
+            this.exhausted.right = true;
+            break;
+          }
         }
-        if (bars.length < PAGE_SIZE) this.exhausted.right = true;
+        if (collected.length > 0) {
+          this.allKlines = this.allKlines.concat(collected);
+          this.chart!.appendData(collected);
+          this.scheduleIndicatorRefresh();
+        }
       } else {
         this.invalidateQualityBadge();
         this.chartContainer.innerHTML = '<div class="loading">加载中...</div>';
@@ -1207,12 +1252,25 @@ export class App {
   }
 
   private refreshIndicators() {
+    if (this.indicatorTimer !== null) {
+      window.clearTimeout(this.indicatorTimer);
+      this.indicatorTimer = null;
+    }
     this.renderActiveIndicators();
     if (this.chart) {
       const klines = this.activeKlines();
       if (klines.length > 0) this.chart.applyIndicators(this.activeIndicators, klines);
     }
     this.scheduleSave();
+  }
+
+  /** 边缘拼接后的延迟刷新：连续滚动时只保留最后一次全量指标计算。 */
+  private scheduleIndicatorRefresh() {
+    if (this.indicatorTimer !== null) window.clearTimeout(this.indicatorTimer);
+    this.indicatorTimer = window.setTimeout(() => {
+      this.indicatorTimer = null;
+      this.refreshIndicators();
+    }, INDICATOR_REFRESH_DEBOUNCE_MS);
   }
 
   private onSearchInput(input: HTMLInputElement, dropdown: HTMLElement) {

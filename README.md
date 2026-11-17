@@ -136,6 +136,8 @@ frontend/           # 前端工程：src/{api,app,backtest,chart,indicators,main
 - 缓存用 **SoA 列集** `KlineColumns`（`time/open/high/low/close/volume` 六条 `Vec`）：reader 本身就是列存储，中间层再存 `Vec<Kline>` 会多出 6 份结构体拷贝。
 - 缓存预算按字节而不是条数：权重取六列 `Vec::capacity` 之和（约 48 字节/bar），上限 2 GiB；条目空闲 10 分钟回收，最长存活 30 分钟（归档由外部下载器更新，TTL 给"新数据最迟多久可见"一个上界）。同一 key 的并发未命中由 moka `try_get_with` 收敛成一次读盘，其余请求等它的结果。
 - 目录扫描（`list_pairs` / `list_timeframes`）另有一级 60 秒 TTL 缓存，键分别是市场、市场 + 交易对；否则 `/api/pairs`、`/udf/search`、`/udf/symbols` 每次请求都要递归 `read_dir` 并逐个品种探测数据文件。
+- 有界 K 线请求只解压与时间窗重叠的归档：`after`/`before` 按 UTC 自然日传给 reader 的 `date_range`；只有 `limit` 时按 2 倍 bar 跨度 + 1 天，从 `before` 或最新归档日期回推起点。最新归档日期按市场/交易对缓存 60 秒。窗口完全落在归档范围外时退回全历史读取，保持“过滤后为空”的原语义。
+- 数据质量报告按市场/交易对/周期缓存 5 分钟，重复打开徽标不再重扫整段归档；`invalidate_cache` 同时清空这份缓存。
 - 响应压缩：客户端带 `Accept-Encoding: gzip` 时由 tower-http 压缩（`Fastest` 级别，只压 >32 字节且非图片/SSE/gRPC 的响应）。实测 1m 全量 4.3 MB → 1.3 MB，release 下多花约 5–10 ms CPU；没有用默认压缩级别，因为本地回环带宽不是瓶颈，默认级别的 CPU 开销换不回相应的传输收益。
 - 时间过滤用二分（`partition_point`）定位窗口，只拷贝窗口内的 bar；`limit` 取窗口内**最后** N 根。
 - `GET /api/quality` 复用同一份缓存列集，输出 bar 数、首尾时间、按周期步长推算的应有 bar 数/缺失数/覆盖率、缺口段数与明细（最多 20 条）、零/负成交量、OHLC 包络异常、非正价格，以及清洗阶段丢弃的重复时间戳/非有限值行数。缺口按数据源周期步长计算，binance `1mo` 按自然月；报告只读缓存，不写状态库。
@@ -173,6 +175,13 @@ tokio 的 worker 线程只做调度。读 zip（实测 52ms）这类同步重活
 - 控件：播放/暂停、单步、0.5×/1×/2×/4×/8×、重置、退出。播放到最后一根自动暂停。
 - 图表层 `updateData()` / `appendData()` 在“前缀不变、只追加或改写最后一根”时走 `series.update()` 写尾部，不再整段 `setData`；`prependData()` 受 lightweight-charts 限制仍整段重绘，但只转换新增的前缀。指标 series 在结构不变时复用已有 series 与 pane，指标序列同样只更新尾部。
 - 回放游标属于临时交互状态，不写入 SQLite；`last_session` 仍只保存交易对/周期/指标/视口。
+
+### 图表加载与边缘翻页
+
+- 新建会话优先选 `1m`（数据源没有 `1m` 时退回该源第一个周期），与 1m K 线归档的常用场景一致。
+- 滚动到左右边缘时每侧最多补一批 2 万根（内部仍按单页 ≤1 万请求），合并后只调用一次 `prependData` / `appendData`，指标刷新统一防抖 120 毫秒；连续滚动只保留最后一次全量指标计算。
+- 尾部增量不超过 200 根时逐根 `series.update()`；超过 200 根（例如 2 万根边缘批次）改为整段 `setData` 一次。2 万根逐根 update 在 Chromium 下约 19 秒，整段写入后约 24 毫秒。
+- 加载不设硬上限；达到 5 万根时信息栏显示“数据量较大，交互可能变慢”，提醒用户而不是拒绝加载。
 
 ### 指标 parity
 
@@ -335,7 +344,7 @@ cargo fmt
 cargo check -p tradingview-backend --all-targets
 cargo clippy -p tradingview-backend --all-targets -- -D warnings
 cargo test -p tradingview-backend
-cargo run -p tradingview-backend                  # 读 config/config.toml，:3001 对外
+cargo run --release -p tradingview-backend        # 读 config/config.toml，:3001 对外
 cd frontend && npm install && npm run dev         # 前端 dev（:5173，/api 代理到 :3001）
 cd frontend && npm run build                       # 产物进 frontend/dist，被后端同服；dist 已入库
 
@@ -344,6 +353,9 @@ uv venv python/.venv
 uv pip install --python python/.venv/bin/python -r python/pyproject.toml
 cd python && .venv/bin/python -m unittest discover -s tests -v
 ```
+
+> 日常开发也直接用 release 二进制跑服务。debug 构建解压 zip、算指标会慢一个数量级，
+> 用它观察 1m 长历史会把机器慢当成应用慢；测试与 `clippy` 仍按上面的 debug 口径跑。
 
 回测真实数据冒烟与接口验证见 [`./docs/backtest.md`](./docs/backtest.md)，行情数据
 口径与数据层验收见 [`./docs/data.md`](./docs/data.md)，五层验证结果见

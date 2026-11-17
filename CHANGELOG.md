@@ -4,6 +4,10 @@
 
 ### Changed
 
+- K 线有界读取：`before`/`after` 按 UTC 自然日裁剪到与窗口重叠的归档，`limit` 再从最新归档日期按 2 倍 bar 跨度回推；XRP spot 1m 首屏冷读 1500 根从全历史解压降到 9–17 ms，左右 10k 边缘页冷读 41–62 ms，暖缓存 1–14 ms。窗口落在归档外时仍退回全历史读，保持过滤后为空的原语义。
+- 最新归档日期按市场/交易对缓存 60 秒，并有界缓存 key 带上读盘窗口；`/api/quality` 报告按市场/交易对/周期缓存 5 分钟，`invalidate_cache` 一并清空。质量报告冷读仍扫整段归档（XRP 1m 750–878 ms），暖读约 0.3 ms。
+- 前端边缘加载改为每侧一批最多 2 万根，合并后只调用一次 `prependData`/`appendData`，指标刷新防抖 120 ms；加载不设硬上限，达到 5 万根时信息栏提示“数据量较大，交互可能变慢”。新建会话优先 `1m`。
+- `README.md` 与 `STEP.md` 的开发/冒烟命令改用 release 二进制：debug 解压归档慢一个数量级，不能用来判断 1m 长历史的交互耗时。
 - `/api/market-types` 现在暴露 `spot` 并置于首位（`spot`、`futures`、`dukascopy`）：本地现货归档早已存在，前端默认市场与回测口径（只吃 spot）从此一致；`futures/cm` 仍未建模。
 - `DataLoader::bases` 改为按市场目录段生成归档根，现货读 `{data_dir}/binance/data/spot/{daily,monthly}/klines`；原先 `Spot` 返回空数组，现与 `futures/um` 同构。
 - 现货 K 线读取使用 `binance_core::BadRowPolicy::Skip` 并记录 warn：官方 spot 1h 2020-12 归档含 `close_time` 早于 `open_time` 的损坏行，原 `Fail` 策略会让整段图表 500；合约读取保持 `Fail`。
@@ -88,6 +92,7 @@
 
 ### Fixed
 
+- 图表边缘追加 2 万根时逐根 `series.update()` 在 Chromium 下产生 19.2 秒长任务；超过 200 根的尾部增量现在整段 `setData` 一次，同一探针降到 23–26 ms，回放/实时追加仍走逐根 update。
 - 回测指标落库精度：`serde_json` 默认浮点解析可能偏 1 ulp，`backtest_runs.metrics_json` 与 worker 的 `result.json` 出现无法解释的末位差；`Cargo.toml` 启用 `float_roundtrip` 后，100 组扫描逐字段一致（指标集 SHA-256 `8848c8bc0786eaf0`）。
 - `tv:first-screen` / `tv:tf-switch:*` 曾在视窗应用前记录，测量到默认 227 根的中间态；`applyInitialViewport` 改为返回 Promise 并由调用方 await。
 - 容器尺寸变化时 lightweight-charts 会把首屏 500 根重置为默认密度；`resize()` 现在保留变化前的逻辑区间。

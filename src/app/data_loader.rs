@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::{DateTime, Days, NaiveDate, Utc};
 use serde::Serialize;
 use thiserror::Error;
 use tracing::instrument;
@@ -44,6 +45,21 @@ const CATALOG_TIMEFRAMES_CAPACITY: u64 = 1024;
 /// `/api/pairs`、`/udf/search`、`/udf/symbols` 每次请求都重扫代价太高；
 /// 目录又会被外部下载器改动，所以 TTL 只给 1 分钟。
 const CATALOG_TIME_TO_LIVE: Duration = Duration::from_secs(60);
+
+/// 质量报告缓存容量（键：市场 + 交易对 + 周期）。
+///
+/// 报告只在全历史列集上统计，结果与请求参数无关；短 TTL 只是让外部
+/// 归档更新后能在一个可预期的时间内反映到徽标上。
+const QUALITY_CAPACITY: u64 = 256;
+
+/// 质量报告的缓存时间。
+const QUALITY_TIME_TO_LIVE: Duration = Duration::from_secs(5 * 60);
+
+/// 最新归档日期的缓存容量（键：市场 + 交易对）。
+const LATEST_DATE_CAPACITY: u64 = 256;
+
+/// 一天对应的毫秒数（归档窗口估算用）。
+const DAY_MS: i64 = 86_400_000;
 
 /// 行情市场类型。
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
@@ -459,8 +475,48 @@ fn dukascopy_timeframes_with_files(pair_dir: &Path) -> Vec<dukascopy_core::Timef
         .collect()
 }
 
-/// 缓存键：市场类型 + 交易对 + 周期。
-type CacheKey = (MarketType, String, String);
+/// 一次读盘需要覆盖的归档日期窗口（UTC，含首尾）。
+///
+/// `None` 表示该方向不设限：全历史读盘、或数据源不支持按日期裁剪。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct ReadBounds {
+    start: Option<NaiveDate>,
+    end: Option<NaiveDate>,
+}
+
+/// K 线列集缓存键：市场 + 交易对 + 周期 + 读盘窗口。
+///
+/// 带窗口的键与全历史键（`bounds = None`）分开：缩放到某个局部区间时
+/// 只读重叠的归档，不会为了 1500 根 bar 解压整段历史。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct KlineCacheKey {
+    market_type: MarketType,
+    pair: String,
+    timeframe: String,
+    bounds: Option<ReadBounds>,
+}
+
+impl KlineCacheKey {
+    fn new(
+        market_type: MarketType,
+        pair: &str,
+        timeframe: &str,
+        bounds: Option<ReadBounds>,
+    ) -> Self {
+        Self {
+            market_type,
+            pair: pair.to_owned(),
+            timeframe: timeframe.to_owned(),
+            bounds,
+        }
+    }
+}
+
+/// 毫秒时间戳对应的 UTC 日期；超出 `chrono` 可表示范围时返回 `None`
+/// （调用方退回全历史读盘，过滤语义不变）。
+fn utc_date(ms: i64) -> Option<NaiveDate> {
+    DateTime::<Utc>::from_timestamp_millis(ms).map(|dt| dt.date_naive())
+}
 
 /// 目录扫描的缓存策略：短 TTL、失败不缓存、同 key single-flight。
 ///
@@ -486,7 +542,11 @@ where
 /// 读到的列集以 `Arc` 共享并进 moka 缓存，命中时零拷贝。
 pub struct DataLoader {
     data_dir: PathBuf,
-    klines_cache: moka::sync::Cache<CacheKey, Arc<KlineColumns>>,
+    klines_cache: moka::sync::Cache<KlineCacheKey, Arc<KlineColumns>>,
+    /// 质量报告缓存（键：市场 + 交易对 + 周期）。
+    quality_cache: moka::sync::Cache<(MarketType, String, String), Arc<QualityReport>>,
+    /// 每个品种最新归档日期（扫描归档文件名得到，短 TTL）。
+    latest_date_cache: moka::sync::Cache<(MarketType, String), Option<NaiveDate>>,
     /// 交易对目录扫描结果（键：市场）。
     pairs_cache: moka::sync::Cache<MarketType, Arc<Vec<String>>>,
     /// 周期目录扫描结果（键：市场 + 交易对）。
@@ -508,9 +568,17 @@ impl DataLoader {
                 // 权重单位是 KiB，`max_capacity` 与 `KlineColumns::weight_kib`
                 // 必须用同一单位，否则预算会差三个数量级。
                 .max_capacity(CACHE_CAPACITY_KIB)
-                .weigher(|_key: &CacheKey, columns: &Arc<KlineColumns>| columns.weight_kib())
+                .weigher(|_key: &KlineCacheKey, columns: &Arc<KlineColumns>| columns.weight_kib())
                 .time_to_idle(CACHE_TIME_TO_IDLE)
                 .time_to_live(CACHE_TIME_TO_LIVE)
+                .build(),
+            quality_cache: moka::sync::Cache::builder()
+                .max_capacity(QUALITY_CAPACITY)
+                .time_to_live(QUALITY_TIME_TO_LIVE)
+                .build(),
+            latest_date_cache: moka::sync::Cache::builder()
+                .max_capacity(LATEST_DATE_CAPACITY)
+                .time_to_live(CATALOG_TIME_TO_LIVE)
                 .build(),
             pairs_cache: moka::sync::Cache::builder()
                 .max_capacity(CATALOG_PAIRS_CAPACITY)
@@ -651,6 +719,7 @@ impl DataLoader {
     /// 取过滤后的 K 线（JSON DTO）。
     ///
     /// `before`/`after` 为开区间过滤，`limit` 取窗口内最后 N 根。
+    /// 有界请求只读覆盖窗口的归档；只有全历史请求才解压全部文件。
     pub fn load_klines_filtered(
         &self,
         market_type: MarketType,
@@ -660,7 +729,7 @@ impl DataLoader {
         after: Option<i64>,
         limit: Option<usize>,
     ) -> Result<Vec<Kline>, DataError> {
-        let all = self.load_all_klines(market_type, pair, timeframe)?;
+        let all = self.load_windowed_klines(market_type, pair, timeframe, before, after, limit)?;
         let range = time_window(&all.time, before, after, limit);
         Ok(all.to_klines(range))
     }
@@ -677,7 +746,7 @@ impl DataLoader {
         before: Option<i64>,
         after: Option<i64>,
     ) -> Result<Arc<KlineColumns>, DataError> {
-        let all = self.load_all_klines(market_type, pair, timeframe)?;
+        let all = self.load_windowed_klines(market_type, pair, timeframe, before, after, None)?;
         let range = time_window(&all.time, before, after, None);
         if range.start == 0 && range.end == all.len() {
             return Ok(all);
@@ -689,7 +758,7 @@ impl DataLoader {
     ///
     /// 统计基于缓存中的整段列集；缺口按数据源的周期步长计算
     /// （binance `1mo` 走自然月，其余为固定毫秒）。读盘与统计都在调用方
-    /// 的 blocking 线程里执行。
+    /// 的 blocking 线程里执行。报告按市场/交易对/周期缓存 5 分钟。
     pub fn quality_report(
         &self,
         market_type: MarketType,
@@ -697,33 +766,188 @@ impl DataLoader {
         timeframe: &str,
     ) -> Result<QualityReport, DataError> {
         let step = BarStep::for_market_timeframe(market_type, timeframe)?;
-        let columns = self.load_all_klines(market_type, pair, timeframe)?;
-        Ok(quality::analyze(
+        let key = (market_type, pair.to_owned(), timeframe.to_owned());
+        if let Some(report) = self.quality_cache.get(&key) {
+            return Ok(report.as_ref().clone());
+        }
+        let columns = self.load_klines(market_type, pair, timeframe, None)?;
+        let report = Arc::new(quality::analyze(
             market_type,
             pair,
             timeframe,
             &columns,
             step,
-        ))
+        ));
+        self.quality_cache.insert(key, Arc::clone(&report));
+        Ok(report.as_ref().clone())
     }
 
-    /// 读取全部 K 线列（带缓存 + single-flight）。
+    /// 为一次过滤请求推导读盘窗口；`None` 表示需要全历史。
     ///
-    /// 命中时零拷贝返回 `Arc`；未命中时同一 key 只允许一个线程读盘，其余
-    /// 线程等它的结果（moka `try_get_with` 的语义）。
-    #[instrument(skip(self))]
-    fn load_all_klines(
+    /// 窗口按 UTC 自然日取整（reader 的 `date_range` 就是按天选的），
+    /// 只会多读，不会漏掉边界 bar。`limit` 需要向前预留足够的 bar 数，
+    /// 用 2 倍步长估算，再对已知的最新归档日期取起点。
+    fn read_bounds(
         &self,
         market_type: MarketType,
         pair: &str,
         timeframe: &str,
+        before: Option<i64>,
+        after: Option<i64>,
+        limit: Option<usize>,
+    ) -> Option<ReadBounds> {
+        // dukascopy 目录没有可裁剪的归档索引，保持全量读取。
+        if market_type == MarketType::Dukascopy {
+            return None;
+        }
+
+        let start;
+        let mut end = before.and_then(utc_date);
+        match after {
+            Some(t) => {
+                start = utc_date(t);
+                // 右边缘翻页只关心 `after` 之后的 limit 根：给读盘终点一个
+                // 上界，避免在历史位置向右翻页时一直读到最新归档。
+                if limit.is_some() && before.is_none() {
+                    let span = Self::limit_span_days(market_type, timeframe, limit.unwrap_or(0));
+                    end = start.and_then(|date| {
+                        span.and_then(|days| date.checked_add_days(Days::new(days)))
+                    });
+                }
+            }
+            None => match limit {
+                Some(n) => start = self.estimated_start(market_type, pair, timeframe, before, n),
+                None => start = None,
+            },
+        }
+        if start.is_none() && end.is_none() {
+            return None;
+        }
+        Some(ReadBounds { start, end })
+    }
+
+    /// `limit` 根 bar 对应的日历天数估算（2 倍冗余 + 1 天）。
+    fn limit_span_days(market_type: MarketType, timeframe: &str, limit: usize) -> Option<u64> {
+        let BarStep::Fixed(step) = BarStep::for_market_timeframe(market_type, timeframe).ok()?
+        else {
+            // 自然月周期数据量小，直接全历史读取。
+            return None;
+        };
+        let span_ms = i64::try_from(limit)
+            .unwrap_or(i64::MAX)
+            .saturating_mul(step)
+            .saturating_mul(2);
+        Some(
+            u64::try_from(span_ms.saturating_add(DAY_MS - 1) / DAY_MS)
+                .unwrap_or(u64::MAX)
+                .saturating_add(1),
+        )
+    }
+
+    /// `limit` 请求的归档起点：`before`（或最新归档）向前留 2 倍 bar 跨度。
+    ///
+    /// 数据存在缺口时可能读不到足量 bar，但 2 倍冗余对正常归档足够；
+    /// 返回 `None` 则退回全历史读盘，语义不变。
+    fn estimated_start(
+        &self,
+        market_type: MarketType,
+        pair: &str,
+        timeframe: &str,
+        before: Option<i64>,
+        limit: usize,
+    ) -> Option<NaiveDate> {
+        let base = match before {
+            Some(t) => utc_date(t)?,
+            None => self.latest_archive_date(market_type, pair, timeframe)?,
+        };
+        let days = Self::limit_span_days(market_type, timeframe, limit)?;
+        base.checked_sub_days(Days::new(days))
+    }
+
+    /// 扫描归档文件名得到该品种/周期的最新归档日期（失败时返回 `None`）。
+    fn latest_archive_date(
+        &self,
+        market_type: MarketType,
+        pair: &str,
+        timeframe: &str,
+    ) -> Option<NaiveDate> {
+        let key = (market_type, pair.to_owned());
+        self.latest_date_cache.get_with(key, || {
+            self.scan_latest_archive_date(market_type, pair, timeframe)
+        })
+    }
+
+    fn scan_latest_archive_date(
+        &self,
+        market_type: MarketType,
+        pair: &str,
+        timeframe: &str,
+    ) -> Option<NaiveDate> {
+        let market = match market_type {
+            MarketType::Spot => binance_core::Market::Spot,
+            _ => binance_core::Market::Um,
+        };
+        let symbol = binance_core::Symbol::parse(pair).ok()?;
+        let interval: binance_core::Interval = timeframe.parse().ok()?;
+        let filter = binance_core::CatalogFilter {
+            market: Some(market),
+            dataset: Some(binance_core::Dataset::Klines),
+            symbol: Some(symbol),
+            period: None,
+        };
+        let catalog = binance_core::catalog(&self.data_dir.join("binance"), &filter).ok()?;
+        catalog
+            .entries
+            .iter()
+            .filter(|entry| entry.interval == Some(interval))
+            .filter_map(|entry| entry.last_date)
+            .max()
+    }
+
+    /// 取请求窗口对应的列集（有界则只读重叠归档）。
+    fn load_windowed_klines(
+        &self,
+        market_type: MarketType,
+        pair: &str,
+        timeframe: &str,
+        before: Option<i64>,
+        after: Option<i64>,
+        limit: Option<usize>,
     ) -> Result<Arc<KlineColumns>, DataError> {
-        let key = (market_type, pair.to_owned(), timeframe.to_owned());
+        if limit == Some(0) || matches!((before, after), (Some(b), Some(a)) if b <= a) {
+            return Ok(Arc::new(KlineColumns::default()));
+        }
+        let bounds = self.read_bounds(market_type, pair, timeframe, before, after, limit);
+        if bounds.is_none() {
+            return self.load_klines(market_type, pair, timeframe, None);
+        }
+        // 窗口可能完全落在归档范围之外（例如请求早于首根 bar 或晚于末根）：
+        // 有界读会因选不到文件而失败，退回全历史保持"过滤后为空"的旧语义。
+        match self.load_klines(market_type, pair, timeframe, bounds) {
+            Ok(columns) => Ok(columns),
+            Err(_) => self.load_klines(market_type, pair, timeframe, None),
+        }
+    }
+
+    /// 读取指定读盘窗口的 K 线列（带缓存 + single-flight）。
+    ///
+    /// 命中时零拷贝返回 `Arc`；未命中时同一 key 只允许一个线程读盘，其余
+    /// 线程等它的结果（moka `try_get_with` 的语义）。`bounds = None`
+    /// 表示全历史，键与局部窗口互不复用。
+    #[instrument(skip(self))]
+    fn load_klines(
+        &self,
+        market_type: MarketType,
+        pair: &str,
+        timeframe: &str,
+        bounds: Option<ReadBounds>,
+    ) -> Result<Arc<KlineColumns>, DataError> {
+        let key = KlineCacheKey::new(market_type, pair, timeframe, bounds);
         // 冷启动时多个请求会同时打同一个 zip：没有 single-flight 就是 N 倍
         // 解压、N 份内存峰值，最后只有一份能进缓存。
         self.klines_cache
             .try_get_with(key, || {
-                self.read_all_klines(market_type, pair, timeframe)
+                self.read_klines(market_type, pair, timeframe, bounds)
                     .map_err(LoadError::from)
             })
             .map_err(|err| err.to_data_error())
@@ -731,16 +955,23 @@ impl DataLoader {
 
     /// 缓存未命中时的真实读盘路径（同一 key 同一时刻只有一个线程执行）。
     #[instrument(skip(self))]
-    fn read_all_klines(
+    fn read_klines(
         &self,
         market_type: MarketType,
         pair: &str,
         timeframe: &str,
+        bounds: Option<ReadBounds>,
     ) -> Result<Arc<KlineColumns>, DataError> {
         #[cfg(test)]
         self.before_read();
 
-        tracing::debug!(%market_type, pair, timeframe, "cache miss — reading kline files");
+        tracing::debug!(
+            %market_type,
+            pair,
+            timeframe,
+            ?bounds,
+            "cache miss — reading kline files"
+        );
 
         // 周期合法性由数据源裁定：不同源的可用周期不同（binance 1m..1mo，
         // dukascopy M1/H1/D1，别名 1m/1h/1d 由 reader 归一），由对应 reader
@@ -807,7 +1038,7 @@ impl DataLoader {
                 };
                 let interval: binance_core::Interval =
                     timeframe.parse().map_err(DataError::InvalidParam)?;
-                let cfg = binance_core::Config::builder(
+                let builder = binance_core::Config::builder(
                     self.data_dir.join("binance"),
                     binance_core::Dataset::Klines,
                     pair,
@@ -821,8 +1052,15 @@ impl DataLoader {
                     binance_core::BadRowPolicy::Skip
                 } else {
                     binance_core::BadRowPolicy::Fail
-                })
-                .build()?;
+                });
+                // 有界请求只让 reader 打开与窗口重叠的归档；全历史请求保持
+                // 原有行为。日期是 UTC 自然日、含首尾，边界 bar 由随后的
+                // `time_window` 按毫秒精确过滤。
+                let builder = match bounds {
+                    Some(bounds) => builder.date_range(bounds.start, bounds.end),
+                    None => builder,
+                };
+                let cfg = builder.build()?;
                 let data = binance_core::read(&cfg)?;
                 if data.report.rows_skipped > 0 {
                     tracing::warn!(
@@ -853,9 +1091,11 @@ impl DataLoader {
         Ok(Arc::new(cols))
     }
 
-    /// 清空全部缓存（K 线列集 + 目录扫描结果）。
+    /// 清空全部缓存（K 线列集 + 质量报告 + 目录扫描结果）。
     pub fn invalidate_cache(&self) {
         self.klines_cache.invalidate_all();
+        self.quality_cache.invalidate_all();
+        self.latest_date_cache.invalidate_all();
         self.pairs_cache.invalidate_all();
         self.timeframes_cache.invalidate_all();
     }
@@ -1389,6 +1629,155 @@ mod tests {
             .load_klines_filtered(MarketType::Futures, "BTCUSDT", "1h", None, None, Some(999))
             .unwrap();
         assert_eq!(klines.len(), 3);
+    }
+
+    #[test]
+    fn test_bounded_limit_skips_old_archives() {
+        let dir = TempDir::new().unwrap();
+        // 旧归档内容损坏；有界读必须只打开最新归档，否则会触发 Fail 策略。
+        write_test_zip_csv(
+            dir.path(),
+            "daily",
+            "BTCUSDT",
+            "1h",
+            "BTCUSDT-1h-2023-01-01.zip",
+            "not,a,valid,kline,csv\n",
+        );
+        write_test_zip(
+            dir.path(),
+            "BTCUSDT",
+            "1h",
+            "BTCUSDT-1h-2024-01-01.zip",
+            &test_rows(),
+        );
+
+        let loader = DataLoader::new(dir.path());
+        let klines = loader
+            .load_klines_filtered(MarketType::Futures, "BTCUSDT", "1h", None, None, Some(1))
+            .unwrap();
+        assert_eq!(klines.len(), 1);
+        assert_eq!(klines[0].time, BASE_MS + 2 * HOUR_MS);
+    }
+
+    #[test]
+    fn test_bounded_after_skips_old_archives() {
+        let dir = TempDir::new().unwrap();
+        write_test_zip_csv(
+            dir.path(),
+            "daily",
+            "BTCUSDT",
+            "1h",
+            "BTCUSDT-1h-2023-01-01.zip",
+            "not,a,valid,kline,csv\n",
+        );
+        write_test_zip(
+            dir.path(),
+            "BTCUSDT",
+            "1h",
+            "BTCUSDT-1h-2024-01-01.zip",
+            &test_rows(),
+        );
+
+        let loader = DataLoader::new(dir.path());
+        let klines = loader
+            .load_klines_filtered(
+                MarketType::Futures,
+                "BTCUSDT",
+                "1h",
+                None,
+                Some(BASE_MS - 1),
+                None,
+            )
+            .unwrap();
+        assert_eq!(klines.len(), 3);
+    }
+
+    #[test]
+    fn test_bounded_right_page_skips_newer_archives() {
+        let dir = TempDir::new().unwrap();
+        write_test_zip(
+            dir.path(),
+            "BTCUSDT",
+            "1h",
+            "BTCUSDT-1h-2024-01-01.zip",
+            &test_rows(),
+        );
+        write_test_zip_csv(
+            dir.path(),
+            "daily",
+            "BTCUSDT",
+            "1h",
+            "BTCUSDT-1h-2024-02-01.zip",
+            "not,a,valid,kline,csv\n",
+        );
+
+        let loader = DataLoader::new(dir.path());
+        // after 已在首段末尾：右翻一页应只碰 2024-01-01 归档，不读更新的损坏文件。
+        let klines = loader
+            .load_klines_filtered(
+                MarketType::Futures,
+                "BTCUSDT",
+                "1h",
+                None,
+                Some(BASE_MS + 2 * HOUR_MS),
+                Some(1),
+            )
+            .unwrap();
+        assert!(klines.is_empty());
+    }
+
+    #[test]
+    fn test_bounded_before_outside_archive_falls_back_to_full_read() {
+        let dir = TempDir::new().unwrap();
+        write_test_zip(
+            dir.path(),
+            "BTCUSDT",
+            "1h",
+            "BTCUSDT-1h-2024-01-01.zip",
+            &test_rows(),
+        );
+
+        let loader = DataLoader::new(dir.path());
+        // 窗口结束时间早于全部归档：有界读选不到文件，退回全历史后过滤为空。
+        let klines = loader
+            .load_klines_filtered(
+                MarketType::Futures,
+                "BTCUSDT",
+                "1h",
+                Some(BASE_MS - 10 * HOUR_MS),
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(klines.is_empty());
+    }
+
+    #[test]
+    fn test_quality_report_is_cached() {
+        let dir = TempDir::new().unwrap();
+        write_test_zip(
+            dir.path(),
+            "BTCUSDT",
+            "1h",
+            "BTCUSDT-1h-2024-01-01.zip",
+            &test_rows(),
+        );
+
+        let loader = DataLoader::new(dir.path());
+        let first = loader
+            .quality_report(MarketType::Futures, "BTCUSDT", "1h")
+            .unwrap();
+        assert_eq!(first.bar_count, 3);
+        loader.quality_cache.run_pending_tasks();
+        assert_eq!(loader.quality_cache.entry_count(), 1);
+
+        // 清空列集缓存并删掉归档：报告仍应由质量缓存直接命中。
+        loader.klines_cache.invalidate_all();
+        std::fs::remove_dir_all(binance_tf_dir(dir.path(), "BTCUSDT", "1h")).unwrap();
+        let second = loader
+            .quality_report(MarketType::Futures, "BTCUSDT", "1h")
+            .unwrap();
+        assert_eq!(second.bar_count, 3);
     }
 
     #[test]

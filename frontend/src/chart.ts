@@ -28,6 +28,11 @@ const MAIN_STRETCH = 0.6;
 const SUB_STRETCH = 0.4;
 const DRAWING_HISTORY_LIMIT = 50;
 const DRAWING_RECORD_DEBOUNCE_MS = 250;
+/**
+ * 逐根 `series.update()` 只在尾部增量较小时划算：每次 update 都有固定开销，
+ * 2 万根要十几秒；超过这个数量就整段 `setData` 一次。
+ */
+const MAX_TAIL_UPDATES = 200;
 
 export type LoadDirection = 'left' | 'right';
 export type DrawingTool = DrawingKind;
@@ -485,7 +490,8 @@ export function createChartManager(
     updateData(klines: Kline[], visibleBars = INITIAL_VISIBLE_BARS) {
       // 回放每前进一步都是"前缀不变 + 追加一根"：只 update 尾部，
       // 缩回或跳转时才整段 setData。
-      if (isTailExtension(allKlines, klines)) {
+      const added = klines.length - allKlines.length;
+      if (added <= MAX_TAIL_UPDATES && isTailExtension(allKlines, klines)) {
         updateCandles(allKlines, klines);
       } else {
         allKlines = klines;
@@ -525,7 +531,7 @@ export function createChartManager(
       if (klines.length === 0) return;
       const savedRange = chart.timeScale().getVisibleLogicalRange();
       const next = allKlines.concat(klines);
-      if (isTailExtension(allKlines, next)) {
+      if (klines.length <= MAX_TAIL_UPDATES && isTailExtension(allKlines, next)) {
         updateCandles(allKlines, next);
       } else {
         allKlines = next;
